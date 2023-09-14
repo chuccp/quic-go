@@ -80,8 +80,6 @@ var _ = Describe("Config", func() {
 				f.Set(reflect.ValueOf(time.Hour))
 			case "MaxTokenAge":
 				f.Set(reflect.ValueOf(2 * time.Hour))
-			case "MaxRetryTokenAge":
-				f.Set(reflect.ValueOf(2 * time.Minute))
 			case "TokenStore":
 				f.Set(reflect.ValueOf(NewLRUTokenStore(2, 3)))
 			case "InitialStreamReceiveWindow":
@@ -115,12 +113,7 @@ var _ = Describe("Config", func() {
 		return c
 	}
 
-	It("uses 10s handshake timeout for short handshake idle timeouts", func() {
-		c := &Config{HandshakeIdleTimeout: time.Second}
-		Expect(c.handshakeTimeout()).To(Equal(protocol.DefaultHandshakeTimeout))
-	})
-
-	It("uses twice the handshake idle timeouts for the handshake timeout, for long handshake idle timeouts", func() {
+	It("uses twice the handshake idle timeouts for the handshake timeout", func() {
 		c := &Config{HandshakeIdleTimeout: time.Second * 11 / 2}
 		Expect(c.handshakeTimeout()).To(Equal(11 * time.Second))
 	})
@@ -192,7 +185,6 @@ var _ = Describe("Config", func() {
 			Expect(c.MaxConnectionReceiveWindow).To(BeEquivalentTo(protocol.DefaultMaxReceiveConnectionFlowControlWindow))
 			Expect(c.MaxIncomingStreams).To(BeEquivalentTo(protocol.DefaultMaxIncomingStreams))
 			Expect(c.MaxIncomingUniStreams).To(BeEquivalentTo(protocol.DefaultMaxIncomingUniStreams))
-			Expect(c.DisableVersionNegotiationPackets).To(BeFalse())
 			Expect(c.DisablePathMTUDiscovery).To(BeFalse())
 			Expect(c.GetConfigForClient).To(BeNil())
 		})

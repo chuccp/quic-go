@@ -18,8 +18,8 @@ jobs:
       TIMESCALE_FACTOR: 3
     name: Integration Tests (${{ matrix.os }}, Go ${{ matrix.go }})
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ matrix.go }}
       - run: go version
@@ -40,6 +40,11 @@ jobs:
         if: ${{ matrix.os == 'ubuntu' && (success() || failure()) }} # run this step even if the previous one failed
         env:
           QUIC_GO_DISABLE_GSO: true
+        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/self -- -version=1 ${{ env.QLOGFLAG }}
+      - name: Run self tests, with ECN disabled
+        if: ${{ matrix.os == 'ubuntu' && (success() || failure()) }} # run this step even if the previous one failed
+        env:
+          QUIC_GO_DISABLE_ECN: true
         run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/self -- -version=1 ${{ env.QLOGFLAG }}
       - name: Run tests (32 bit)
         if: ${{ matrix.os != 'macos' && (success() || failure()) }} # run this step even if the previous one failed

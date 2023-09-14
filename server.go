@@ -59,7 +59,8 @@ type zeroRTTQueue struct {
 type baseServer struct {
 	mutex sync.Mutex
 
-	acceptEarlyConns bool
+	disableVersionNegotiation bool
+	acceptEarlyConns          bool
 
 	tlsConf *tls.Config
 	config  *Config
@@ -226,6 +227,7 @@ func newServer(
 	config *Config,
 	tracer logging.Tracer,
 	onClose func(),
+	disableVersionNegotiation bool,
 	acceptEarly bool,
 ) (*baseServer, error) {
 	tokenGenerator, err := handshake.NewTokenGenerator(rand.Reader)
@@ -233,23 +235,24 @@ func newServer(
 		return nil, err
 	}
 	s := &baseServer{
-		conn:                    conn,
-		tlsConf:                 tlsConf,
-		config:                  config,
-		tokenGenerator:          tokenGenerator,
-		connIDGenerator:         connIDGenerator,
-		connHandler:             connHandler,
-		connQueue:               make(chan quicConn),
-		errorChan:               make(chan struct{}),
-		running:                 make(chan struct{}),
-		receivedPackets:         make(chan receivedPacket, protocol.MaxServerUnprocessedPackets),
-		versionNegotiationQueue: make(chan receivedPacket, 4),
-		invalidTokenQueue:       make(chan receivedPacket, 4),
-		newConn:                 newConnection,
-		tracer:                  tracer,
-		logger:                  utils.DefaultLogger.WithPrefix("server"),
-		acceptEarlyConns:        acceptEarly,
-		onClose:                 onClose,
+		conn:                      conn,
+		tlsConf:                   tlsConf,
+		config:                    config,
+		tokenGenerator:            tokenGenerator,
+		connIDGenerator:           connIDGenerator,
+		connHandler:               connHandler,
+		connQueue:                 make(chan quicConn),
+		errorChan:                 make(chan struct{}),
+		running:                   make(chan struct{}),
+		receivedPackets:           make(chan receivedPacket, protocol.MaxServerUnprocessedPackets),
+		versionNegotiationQueue:   make(chan receivedPacket, 4),
+		invalidTokenQueue:         make(chan receivedPacket, 4),
+		newConn:                   newConnection,
+		tracer:                    tracer,
+		logger:                    utils.DefaultLogger.WithPrefix("server"),
+		acceptEarlyConns:          acceptEarly,
+		disableVersionNegotiation: disableVersionNegotiation,
+		onClose:                   onClose,
 	}
 	if acceptEarly {
 		s.zeroRTTQueues = map[protocol.ConnectionID]*zeroRTTQueue{}
@@ -383,7 +386,7 @@ func (s *baseServer) handlePacketImpl(p receivedPacket) bool /* is the buffer st
 	}
 	// send a Version Negotiation Packet if the client is speaking a different protocol version
 	if !protocol.IsSupportedVersion(s.config.Versions, v) {
-		if s.config.DisableVersionNegotiationPackets {
+		if s.disableVersionNegotiation {
 			return false
 		}
 
@@ -528,7 +531,7 @@ func (s *baseServer) validateToken(token *handshake.Token, addr net.Addr) bool {
 	if !token.IsRetryToken && time.Since(token.SentTime) > s.config.MaxTokenAge {
 		return false
 	}
-	if token.IsRetryToken && time.Since(token.SentTime) > s.config.MaxRetryTokenAge {
+	if token.IsRetryToken && time.Since(token.SentTime) > s.config.maxRetryTokenAge() {
 		return false
 	}
 	return true
@@ -742,7 +745,7 @@ func (s *baseServer) sendRetry(remoteAddr net.Addr, hdr *wire.Header, info packe
 	if s.tracer != nil {
 		s.tracer.SentPacket(remoteAddr, &replyHdr.Header, protocol.ByteCount(len(buf.Data)), nil)
 	}
-	_, err = s.conn.WritePacket(buf.Data, remoteAddr, info.OOB())
+	_, err = s.conn.WritePacket(buf.Data, remoteAddr, info.OOB(), 0, protocol.ECNUnsupported)
 	return err
 }
 
@@ -841,7 +844,7 @@ func (s *baseServer) sendError(remoteAddr net.Addr, hdr *wire.Header, sealer han
 	if s.tracer != nil {
 		s.tracer.SentPacket(remoteAddr, &replyHdr.Header, protocol.ByteCount(len(b.Data)), []logging.Frame{ccf})
 	}
-	_, err = s.conn.WritePacket(b.Data, remoteAddr, info.OOB())
+	_, err = s.conn.WritePacket(b.Data, remoteAddr, info.OOB(), 0, protocol.ECNUnsupported)
 	return err
 }
 
@@ -879,7 +882,7 @@ func (s *baseServer) maybeSendVersionNegotiationPacket(p receivedPacket) {
 	if s.tracer != nil {
 		s.tracer.SentVersionNegotiationPacket(p.remoteAddr, src, dest, s.config.Versions)
 	}
-	if _, err := s.conn.WritePacket(data, p.remoteAddr, p.info.OOB()); err != nil {
+	if _, err := s.conn.WritePacket(data, p.remoteAddr, p.info.OOB(), 0, protocol.ECNUnsupported); err != nil {
 		s.logger.Debugf("Error sending Version Negotiation: %s", err)
 	}
 }

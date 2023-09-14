@@ -21,14 +21,17 @@ type connCapabilities struct {
 	DF bool
 	// GSO (Generic Segmentation Offload) supported
 	GSO bool
+	// ECN (Explicit Congestion Notifications) supported
+	ECN bool
 }
 
 // rawConn is a connection that allow reading of a receivedPackeh.
 type rawConn interface {
 	ReadPacket() (receivedPacket, error)
 	// WritePacket writes a packet on the wire.
-	// If GSO is enabled, it's the caller's responsibility to set the correct control message.
-	WritePacket(b []byte, addr net.Addr, oob []byte) (int, error)
+	// gsoSize is the size of a single packet, or 0 to disable GSO.
+	// It is invalid to set gsoSize if capabilities.GSO is not set.
+	WritePacket(b []byte, addr net.Addr, packetInfoOOB []byte, gsoSize uint16, ecn protocol.ECN) (int, error)
 	LocalAddr() net.Addr
 	SetReadDeadline(time.Time) error
 	io.Closer

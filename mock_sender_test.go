@@ -75,15 +75,15 @@ func (mr *MockSenderMockRecorder) Run() *gomock.Call {
 }
 
 // Send mocks base method.
-func (m *MockSender) Send(arg0 *packetBuffer, arg1 protocol.ByteCount) {
+func (m *MockSender) Send(arg0 *packetBuffer, arg1 uint16, arg2 protocol.ECN) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Send", arg0, arg1)
+	m.ctrl.Call(m, "Send", arg0, arg1, arg2)
 }
 
 // Send indicates an expected call of Send.
-func (mr *MockSenderMockRecorder) Send(arg0, arg1 interface{}) *gomock.Call {
+func (mr *MockSenderMockRecorder) Send(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockSender)(nil).Send), arg0, arg1)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockSender)(nil).Send), arg0, arg1, arg2)
 }
 
 // WouldBlock mocks base method.
