@@ -15,3 +15,11 @@ func NewClient(conn net.PacketConn, config *tls.Config) *http.Client {
 	}
 	return &http.Client{Transport: roundTripper}
 }
+func GetTransport(conn net.PacketConn, config *tls.Config) *RoundTripper {
+	transport := &quic.Transport{Conn: conn}
+	roundTripper := &RoundTripper{
+		transport:       transport,
+		TLSClientConfig: config,
+	}
+	return roundTripper
+}
