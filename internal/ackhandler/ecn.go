@@ -45,13 +45,13 @@ type ecnTracker struct {
 	numSentECT0, numSentECT1                  int64
 	numAckedECT0, numAckedECT1, numAckedECNCE int64
 
-	tracer logging.ConnectionTracer
+	tracer *logging.ConnectionTracer
 	logger utils.Logger
 }
 
 var _ ecnHandler = &ecnTracker{}
 
-func newECNTracker(logger utils.Logger, tracer logging.ConnectionTracer) *ecnTracker {
+func newECNTracker(logger utils.Logger, tracer *logging.ConnectionTracer) *ecnTracker {
 	return &ecnTracker{
 		firstTestingPacket: protocol.InvalidPacketNumber,
 		lastTestingPacket:  protocol.InvalidPacketNumber,
@@ -92,7 +92,7 @@ func (e *ecnTracker) SentPacket(pn protocol.PacketNumber, ecn protocol.ECN) {
 		e.firstTestingPacket = pn
 	}
 	if e.numSentECT0+e.numSentECT1 >= numECNTestingPackets {
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateUnknown, logging.ECNTriggerNoTrigger)
 		}
 		e.state = ecnStateUnknown
@@ -103,7 +103,7 @@ func (e *ecnTracker) SentPacket(pn protocol.PacketNumber, ecn protocol.ECN) {
 func (e *ecnTracker) Mode() protocol.ECN {
 	switch e.state {
 	case ecnStateInitial:
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateTesting, logging.ECNTriggerNoTrigger)
 		}
 		e.state = ecnStateTesting
@@ -125,13 +125,20 @@ func (e *ecnTracker) LostPacket(pn protocol.PacketNumber) {
 		return
 	}
 	e.numLostTesting++
+	// Only proceed if we have sent all 10 testing packets.
+	if e.state != ecnStateUnknown {
+		return
+	}
 	if e.numLostTesting >= e.numSentTesting {
 		e.logger.Debugf("Disabling ECN. All testing packets were lost.")
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedLostAllTestingPackets)
 		}
 		e.state = ecnStateFailed
+		return
 	}
+	// Path validation also fails if some testing packets are lost, and all other testing packets where CE-marked
+	e.failIfMangled()
 }
 
 // HandleNewlyAcked handles the ECN counts on an ACK frame.
@@ -146,7 +153,7 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	// the total number of packets sent with each corresponding ECT codepoint.
 	if ect0 > e.numSentECT0 || ect1 > e.numSentECT1 {
 		e.logger.Debugf("Disabling ECN. Received more ECT(0) / ECT(1) acknowledgements than packets sent.")
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedMoreECNCountsThanSent)
 		}
 		e.state = ecnStateFailed
@@ -172,7 +179,7 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	// * peers that don't report any ECN counts
 	if (ackedECT0 > 0 || ackedECT1 > 0) && ect0 == 0 && ect1 == 0 && ecnce == 0 {
 		e.logger.Debugf("Disabling ECN. ECN-marked packet acknowledged, but no ECN counts on ACK frame.")
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedNoECNCounts)
 		}
 		e.state = ecnStateFailed
@@ -189,7 +196,7 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	// Any decrease means that the peer's counting logic is broken.
 	if newECT0 < 0 || newECT1 < 0 || newECNCE < 0 {
 		e.logger.Debugf("Disabling ECN. ECN counts decreased unexpectedly.")
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedDecreasedECNCounts)
 		}
 		e.state = ecnStateFailed
@@ -201,7 +208,7 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	// This could be the result of (partial) bleaching.
 	if newECT0+newECNCE < ackedECT0 {
 		e.logger.Debugf("Disabling ECN. Received less ECT(0) + ECN-CE than packets sent with ECT(0).")
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedTooFewECNCounts)
 		}
 		e.state = ecnStateFailed
@@ -211,7 +218,7 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	// the number of newly acknowledged packets sent with an ECT(1) marking.
 	if newECT1+newECNCE < ackedECT1 {
 		e.logger.Debugf("Disabling ECN. Received less ECT(1) + ECN-CE than packets sent with ECT(1).")
-		if e.tracer != nil {
+		if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 			e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedTooFewECNCounts)
 		}
 		e.state = ecnStateFailed
@@ -223,16 +230,15 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	e.numAckedECT1 = ect1
 	e.numAckedECNCE = ecnce
 
-	if e.state == ecnStateTesting || e.state == ecnStateUnknown {
-		// Detect mangling (a path remarking all ECN-marked testing packets as CE).
-		if e.numSentECT0+e.numSentECT1 == e.numAckedECNCE && e.numAckedECNCE >= numECNTestingPackets {
-			if e.tracer != nil {
-				e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedManglingDetected)
-			}
-			e.state = ecnStateFailed
+	// Detect mangling (a path remarking all ECN-marked testing packets as CE),
+	// once all 10 testing packets have been sent out.
+	if e.state == ecnStateUnknown {
+		e.failIfMangled()
+		if e.state == ecnStateFailed {
 			return false
 		}
-
+	}
+	if e.state == ecnStateTesting || e.state == ecnStateUnknown {
 		var ackedTestingPacket bool
 		for _, p := range packets {
 			if e.isTestingPacket(p.PacketNumber) {
@@ -243,7 +249,7 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 		// This check won't succeed if the path is mangling ECN-marks (i.e. rewrites all ECN-marked packets to CE).
 		if ackedTestingPacket && (newECT0 > 0 || newECT1 > 0) {
 			e.logger.Debugf("ECN capability confirmed.")
-			if e.tracer != nil {
+			if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
 				e.tracer.ECNStateUpdated(logging.ECNStateCapable, logging.ECNTriggerNoTrigger)
 			}
 			e.state = ecnStateCapable
@@ -253,6 +259,18 @@ func (e *ecnTracker) HandleNewlyAcked(packets []*packet, ect0, ect1, ecnce int64
 	// Don't trust CE marks before having confirmed ECN capability of the path.
 	// Otherwise, mangling would be misinterpreted as actual congestion.
 	return e.state == ecnStateCapable && newECNCE > 0
+}
+
+// failIfMangled fails ECN validation if all testing packets are lost or CE-marked.
+func (e *ecnTracker) failIfMangled() {
+	numAckedECNCE := e.numAckedECNCE + int64(e.numLostTesting)
+	if e.numSentECT0+e.numSentECT1 > numAckedECNCE {
+		return
+	}
+	if e.tracer != nil && e.tracer.ECNStateUpdated != nil {
+		e.tracer.ECNStateUpdated(logging.ECNStateFailed, logging.ECNFailedManglingDetected)
+	}
+	e.state = ecnStateFailed
 }
 
 func (e *ecnTracker) ecnMarking(pn protocol.PacketNumber) protocol.ECN {

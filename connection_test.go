@@ -100,9 +100,9 @@ var _ = Describe("Connection", func() {
 		mconn.EXPECT().capabilities().DoAndReturn(func() connCapabilities { return capabilities }).AnyTimes()
 		mconn.EXPECT().RemoteAddr().Return(remoteAddr).AnyTimes()
 		mconn.EXPECT().LocalAddr().Return(localAddr).AnyTimes()
-		tokenGenerator, err := handshake.NewTokenGenerator(rand.Reader)
-		Expect(err).ToNot(HaveOccurred())
-		tracer = mocklogging.NewMockConnectionTracer(mockCtrl)
+		tokenGenerator := handshake.NewTokenGenerator([32]byte{0xa, 0xb, 0xc})
+		var tr *logging.ConnectionTracer
+		tr, tracer = mocklogging.NewMockConnectionTracer(mockCtrl)
 		tracer.EXPECT().NegotiatedVersion(gomock.Any(), gomock.Any(), gomock.Any()).MaxTimes(1)
 		tracer.EXPECT().SentTransportParameters(gomock.Any())
 		tracer.EXPECT().UpdatedKeyFromTLS(gomock.Any(), gomock.Any()).AnyTimes()
@@ -121,7 +121,7 @@ var _ = Describe("Connection", func() {
 			&tls.Config{},
 			tokenGenerator,
 			false,
-			tracer,
+			tr,
 			1234,
 			utils.DefaultLogger,
 			protocol.Version1,
@@ -2541,7 +2541,8 @@ var _ = Describe("Client Connection", func() {
 			tlsConf = &tls.Config{}
 		}
 		connRunner = NewMockConnRunner(mockCtrl)
-		tracer = mocklogging.NewMockConnectionTracer(mockCtrl)
+		var tr *logging.ConnectionTracer
+		tr, tracer = mocklogging.NewMockConnectionTracer(mockCtrl)
 		tracer.EXPECT().NegotiatedVersion(gomock.Any(), gomock.Any(), gomock.Any()).MaxTimes(1)
 		tracer.EXPECT().SentTransportParameters(gomock.Any())
 		tracer.EXPECT().UpdatedKeyFromTLS(gomock.Any(), gomock.Any()).AnyTimes()
@@ -2557,7 +2558,7 @@ var _ = Describe("Client Connection", func() {
 			42, // initial packet number
 			false,
 			false,
-			tracer,
+			tr,
 			1234,
 			utils.DefaultLogger,
 			protocol.Version1,

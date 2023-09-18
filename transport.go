@@ -16,6 +16,8 @@ import (
 	"github.com/quic-go/quic-go/logging"
 )
 
+var errListenerAlreadySet = errors.New("listener already set")
+
 // The Transport is the central point to manage incoming and outgoing QUIC connections.
 // QUIC demultiplexes connections based on their QUIC Connection IDs, not based on the 4-tuple.
 // This means that a single UDP socket can be used for listening for incoming connections, as well as
@@ -57,13 +59,26 @@ type Transport struct {
 	// See section 10.3 of RFC 9000 for details.
 	StatelessResetKey *StatelessResetKey
 
+	// The TokenGeneratorKey is used to encrypt session resumption tokens.
+	// If no key is configured, a random key will be generated.
+	// If multiple servers are authoritative for the same domain, they should use the same key,
+	// see section 8.1.3 of RFC 9000 for details.
+	TokenGeneratorKey *TokenGeneratorKey
+
+	// MaxTokenAge is the maximum age of the resumption token presented during the handshake.
+	// These tokens allow skipping address resumption when resuming a QUIC connection,
+	// and are especially useful when using 0-RTT.
+	// If not set, it defaults to 24 hours.
+	// See section 8.1.3 of RFC 9000 for details.
+	MaxTokenAge time.Duration
+
 	// DisableVersionNegotiationPackets disables the sending of Version Negotiation packets.
 	// This can be useful if version information is exchanged out-of-band.
 	// It has no effect for clients.
 	DisableVersionNegotiationPackets bool
 
 	// A Tracer traces events that don't belong to a single QUIC connection.
-	Tracer logging.Tracer
+	Tracer *logging.Tracer
 
 	handlerMap packetHandlerManager
 
@@ -78,7 +93,7 @@ type Transport struct {
 	// If no ConnectionIDGenerator is set, this is set to a default.
 	connIDGenerator ConnectionIDGenerator
 
-	server unknownPacketHandler
+	server *baseServer
 
 	conn rawConn
 
@@ -136,7 +151,7 @@ func (t *Transport) createServer(tlsConf *tls.Config, conf *Config, allow0RTT bo
 	if err := t.init(false); err != nil {
 		return nil, err
 	}
-	s, err := newServer(
+	s := newServer(
 		t.conn,
 		t.handlerMap,
 		t.connIDGenerator,
@@ -144,12 +159,11 @@ func (t *Transport) createServer(tlsConf *tls.Config, conf *Config, allow0RTT bo
 		conf,
 		t.Tracer,
 		t.closeServer,
+		*t.TokenGeneratorKey,
+		t.MaxTokenAge,
 		t.DisableVersionNegotiationPackets,
 		allow0RTT,
 	)
-	if err != nil {
-		return nil, err
-	}
 	t.server = s
 	return s, nil
 }
@@ -203,6 +217,14 @@ func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 
 		t.closeQueue = make(chan closePacket, 4)
 		t.statelessResetQueue = make(chan receivedPacket, 4)
+		if t.TokenGeneratorKey == nil {
+			var key TokenGeneratorKey
+			if _, err := rand.Read(key[:]); err != nil {
+				t.initErr = err
+				return
+			}
+			t.TokenGeneratorKey = &key
+		}
 
 		if t.ConnectionIDGenerator != nil {
 			t.connIDGenerator = t.ConnectionIDGenerator
@@ -351,7 +373,7 @@ func (t *Transport) handlePacket(p receivedPacket) {
 	connID, err := wire.ParseConnectionID(p.data, t.connIDLen)
 	if err != nil {
 		t.logger.Debugf("error parsing connection ID on packet from %s: %s", p.remoteAddr, err)
-		if t.Tracer != nil {
+		if t.Tracer != nil && t.Tracer.DroppedPacket != nil {
 			t.Tracer.DroppedPacket(p.remoteAddr, logging.PacketTypeNotDetermined, p.Size(), logging.PacketDropHeaderParseError)
 		}
 		p.buffer.MaybeRelease()
@@ -446,7 +468,7 @@ func (t *Transport) handleNonQUICPacket(p receivedPacket) {
 	select {
 	case t.nonQUICPackets <- p:
 	default:
-		if t.Tracer != nil {
+		if t.Tracer != nil && t.Tracer.DroppedPacket != nil {
 			t.Tracer.DroppedPacket(p.remoteAddr, logging.PacketTypeNotDetermined, p.Size(), logging.PacketDropDOSPrevention)
 		}
 	}

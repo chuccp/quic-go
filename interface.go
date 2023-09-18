@@ -212,6 +212,9 @@ type EarlyConnection interface {
 // StatelessResetKey is a key used to derive stateless reset tokens.
 type StatelessResetKey [32]byte
 
+// TokenGeneratorKey is a key used to encrypt session resumption tokens.
+type TokenGeneratorKey = handshake.TokenProtectorKey
+
 // A ConnectionID is a QUIC Connection ID, as defined in RFC 9000.
 // It is not able to handle QUIC Connection IDs longer than 20 bytes,
 // as they are allowed by RFC 8999.
@@ -265,10 +268,6 @@ type Config struct {
 	// See https://datatracker.ietf.org/doc/html/rfc9000#section-8 for details.
 	// If not set, every client is forced to prove its remote address.
 	RequireAddressValidation func(net.Addr) bool
-	// MaxTokenAge is the maximum age of the token presented during the handshake,
-	// for tokens that were issued on a previous connection.
-	// If not set, it defaults to 24 hours. Only valid for a server.
-	MaxTokenAge time.Duration
 	// The TokenStore stores tokens received from the server.
 	// Tokens are used to skip address validation on future connection attempts.
 	// The key used to store tokens is the ServerName from the tls.Config, if set
@@ -325,7 +324,7 @@ type Config struct {
 	Allow0RTT bool
 	// Enable QUIC datagram support (RFC 9221).
 	EnableDatagrams bool
-	Tracer          func(context.Context, logging.Perspective, ConnectionID) logging.ConnectionTracer
+	Tracer          func(context.Context, logging.Perspective, ConnectionID) *logging.ConnectionTracer
 }
 
 type ClientHelloInfo struct {
