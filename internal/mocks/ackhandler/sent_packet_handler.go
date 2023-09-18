@@ -8,10 +8,10 @@ import (
 	reflect "reflect"
 	time "time"
 
-	gomock "github.com/golang/mock/gomock"
 	ackhandler "github.com/quic-go/quic-go/internal/ackhandler"
 	protocol "github.com/quic-go/quic-go/internal/protocol"
 	wire "github.com/quic-go/quic-go/internal/wire"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockSentPacketHandler is a mock of SentPacketHandler interface.
@@ -47,6 +47,20 @@ func (m *MockSentPacketHandler) DropPackets(arg0 protocol.EncryptionLevel) {
 func (mr *MockSentPacketHandlerMockRecorder) DropPackets(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DropPackets", reflect.TypeOf((*MockSentPacketHandler)(nil).DropPackets), arg0)
+}
+
+// ECNMode mocks base method.
+func (m *MockSentPacketHandler) ECNMode(arg0 bool) protocol.ECN {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ECNMode", arg0)
+	ret0, _ := ret[0].(protocol.ECN)
+	return ret0
+}
+
+// ECNMode indicates an expected call of ECNMode.
+func (mr *MockSentPacketHandlerMockRecorder) ECNMode(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ECNMode", reflect.TypeOf((*MockSentPacketHandler)(nil).ECNMode), arg0)
 }
 
 // GetLossDetectionTimeout mocks base method.
@@ -148,17 +162,17 @@ func (mr *MockSentPacketHandlerMockRecorder) ReceivedBytes(arg0 interface{}) *go
 }
 
 // ResetForRetry mocks base method.
-func (m *MockSentPacketHandler) ResetForRetry() error {
+func (m *MockSentPacketHandler) ResetForRetry(arg0 time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ResetForRetry")
+	ret := m.ctrl.Call(m, "ResetForRetry", arg0)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ResetForRetry indicates an expected call of ResetForRetry.
-func (mr *MockSentPacketHandlerMockRecorder) ResetForRetry() *gomock.Call {
+func (mr *MockSentPacketHandlerMockRecorder) ResetForRetry(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetForRetry", reflect.TypeOf((*MockSentPacketHandler)(nil).ResetForRetry))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetForRetry", reflect.TypeOf((*MockSentPacketHandler)(nil).ResetForRetry), arg0)
 }
 
 // SendMode mocks base method.
@@ -176,15 +190,15 @@ func (mr *MockSentPacketHandlerMockRecorder) SendMode(arg0 interface{}) *gomock.
 }
 
 // SentPacket mocks base method.
-func (m *MockSentPacketHandler) SentPacket(arg0 time.Time, arg1, arg2 protocol.PacketNumber, arg3 []ackhandler.StreamFrame, arg4 []ackhandler.Frame, arg5 protocol.EncryptionLevel, arg6 protocol.ByteCount, arg7 bool) {
+func (m *MockSentPacketHandler) SentPacket(arg0 time.Time, arg1, arg2 protocol.PacketNumber, arg3 []ackhandler.StreamFrame, arg4 []ackhandler.Frame, arg5 protocol.EncryptionLevel, arg6 protocol.ECN, arg7 protocol.ByteCount, arg8 bool) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SentPacket", arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+	m.ctrl.Call(m, "SentPacket", arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
 }
 
 // SentPacket indicates an expected call of SentPacket.
-func (mr *MockSentPacketHandlerMockRecorder) SentPacket(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7 interface{}) *gomock.Call {
+func (mr *MockSentPacketHandlerMockRecorder) SentPacket(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SentPacket", reflect.TypeOf((*MockSentPacketHandler)(nil).SentPacket), arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SentPacket", reflect.TypeOf((*MockSentPacketHandler)(nil).SentPacket), arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
 }
 
 // SetHandshakeConfirmed mocks base method.
