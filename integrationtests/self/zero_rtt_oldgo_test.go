@@ -26,8 +26,8 @@ import (
 var _ = Describe("0-RTT", func() {
 	rtt := scaleDuration(5 * time.Millisecond)
 
-	runCountingProxy := func(serverPort int) (*quicproxy.QuicProxy, *uint32) {
-		var num0RTTPackets uint32 // to be used as an atomic
+	runCountingProxy := func(serverPort int) (*quicproxy.QuicProxy, *atomic.Uint32) {
+		var num0RTTPackets atomic.Uint32
 		proxy, err := quicproxy.NewQuicProxy("localhost:0", &quicproxy.Opts{
 			RemoteAddr: fmt.Sprintf("localhost:%d", serverPort),
 			DelayPacket: func(_ quicproxy.Direction, data []byte) time.Duration {
@@ -38,7 +38,7 @@ var _ = Describe("0-RTT", func() {
 					hdr, _, rest, err := wire.ParsePacket(data)
 					Expect(err).ToNot(HaveOccurred())
 					if hdr.Type == protocol.PacketType0RTT {
-						atomic.AddUint32(&num0RTTPackets, 1)
+						num0RTTPackets.Add(1)
 						break
 					}
 					data = rest
@@ -257,7 +257,7 @@ var _ = Describe("0-RTT", func() {
 				Expect(numNewConnIDs).ToNot(BeZero())
 			}
 
-			num0RTT := atomic.LoadUint32(num0RTTPackets)
+			num0RTT := num0RTTPackets.Load()
 			fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 			Expect(num0RTT).ToNot(BeZero())
 			zeroRTTPackets := get0RTTPackets(counter.getRcvdLongHeaderPackets())
@@ -348,10 +348,7 @@ var _ = Describe("0-RTT", func() {
 	})
 
 	It("transfers 0-RTT data, when 0-RTT packets are lost", func() {
-		var (
-			num0RTTPackets uint32 // to be used as an atomic
-			num0RTTDropped uint32
-		)
+		var num0RTTPackets, num0RTTDropped atomic.Uint32
 
 		tlsConf, clientConf := dialAndReceiveSessionTicket(nil)
 
@@ -374,7 +371,7 @@ var _ = Describe("0-RTT", func() {
 					hdr, _, _, err := wire.ParsePacket(data)
 					Expect(err).ToNot(HaveOccurred())
 					if hdr.Type == protocol.PacketType0RTT {
-						atomic.AddUint32(&num0RTTPackets, 1)
+						num0RTTPackets.Add(1)
 					}
 				}
 				return rtt / 2
@@ -389,7 +386,7 @@ var _ = Describe("0-RTT", func() {
 					// drop 25% of the 0-RTT packets
 					drop := mrand.Intn(4) == 0
 					if drop {
-						atomic.AddUint32(&num0RTTDropped, 1)
+						num0RTTDropped.Add(1)
 					}
 					return drop
 				}
@@ -401,8 +398,8 @@ var _ = Describe("0-RTT", func() {
 
 		transfer0RTTData(ln, proxy.LocalPort(), protocol.DefaultConnectionIDLength, clientConf, nil, PRData)
 
-		num0RTT := atomic.LoadUint32(&num0RTTPackets)
-		numDropped := atomic.LoadUint32(&num0RTTDropped)
+		num0RTT := num0RTTPackets.Load()
+		numDropped := num0RTTDropped.Load()
 		fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets. Dropped %d of those.", num0RTT, numDropped)
 		Expect(numDropped).ToNot(BeZero())
 		Expect(num0RTT).ToNot(BeZero())
@@ -485,6 +482,37 @@ var _ = Describe("0-RTT", func() {
 		Expect(zeroRTTPackets[0]).To(BeNumerically(">=", protocol.PacketNumber(5)))
 	})
 
+	It("doesn't use 0-RTT when Dial is used for the resumed connection", func() {
+		tlsConf, clientConf := dialAndReceiveSessionTicket(nil)
+
+		ln, err := quic.ListenAddrEarly(
+			"localhost:0",
+			tlsConf,
+			getQuicConfig(&quic.Config{Allow0RTT: true}),
+		)
+		Expect(err).ToNot(HaveOccurred())
+		defer ln.Close()
+		proxy, num0RTTPackets := runCountingProxy(ln.Addr().(*net.UDPAddr).Port)
+		defer proxy.Close()
+
+		conn, err := quic.DialAddr(
+			context.Background(),
+			fmt.Sprintf("localhost:%d", proxy.LocalPort()),
+			clientConf,
+			getQuicConfig(nil),
+		)
+		Expect(err).ToNot(HaveOccurred())
+		defer conn.CloseWithError(0, "")
+		Expect(conn.ConnectionState().TLS.DidResume).To(BeTrue())
+		Expect(conn.ConnectionState().Used0RTT).To(BeFalse())
+		Expect(num0RTTPackets.Load()).To(BeZero())
+
+		serverConn, err := ln.Accept(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(serverConn.ConnectionState().TLS.DidResume).To(BeTrue())
+		Expect(serverConn.ConnectionState().Used0RTT).To(BeFalse())
+	})
+
 	It("doesn't reject 0-RTT when the server's transport stream limit increased", func() {
 		const maxStreams = 1
 		tlsConf, clientConf := dialAndReceiveSessionTicket(getQuicConfig(&quic.Config{
@@ -551,7 +579,7 @@ var _ = Describe("0-RTT", func() {
 		check0RTTRejected(ln, proxy.LocalPort(), clientConf)
 
 		// The client should send 0-RTT packets, but the server doesn't process them.
-		num0RTT := atomic.LoadUint32(num0RTTPackets)
+		num0RTT := num0RTTPackets.Load()
 		fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 		Expect(num0RTT).ToNot(BeZero())
 		Expect(get0RTTPackets(counter.getRcvdLongHeaderPackets())).To(BeEmpty())
@@ -580,7 +608,7 @@ var _ = Describe("0-RTT", func() {
 		check0RTTRejected(ln, proxy.LocalPort(), clientConf)
 
 		// The client should send 0-RTT packets, but the server doesn't process them.
-		num0RTT := atomic.LoadUint32(num0RTTPackets)
+		num0RTT := num0RTTPackets.Load()
 		fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 		Expect(num0RTT).ToNot(BeZero())
 		Expect(get0RTTPackets(counter.getRcvdLongHeaderPackets())).To(BeEmpty())
@@ -607,7 +635,7 @@ var _ = Describe("0-RTT", func() {
 		check0RTTRejected(ln, proxy.LocalPort(), clientConf)
 
 		// The client should send 0-RTT packets, but the server doesn't process them.
-		num0RTT := atomic.LoadUint32(num0RTTPackets)
+		num0RTT := num0RTTPackets.Load()
 		fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 		Expect(num0RTT).ToNot(BeZero())
 		Expect(get0RTTPackets(counter.getRcvdLongHeaderPackets())).To(BeEmpty())
@@ -759,7 +787,7 @@ var _ = Describe("0-RTT", func() {
 			Expect(conn.CloseWithError(0, "")).To(Succeed())
 
 			// The client should send 0-RTT packets, but the server doesn't process them.
-			num0RTT := atomic.LoadUint32(num0RTTPackets)
+			num0RTT := num0RTTPackets.Load()
 			fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 			Expect(num0RTT).ToNot(BeZero())
 			Expect(get0RTTPackets(counter.getRcvdLongHeaderPackets())).To(BeEmpty())
@@ -830,7 +858,7 @@ var _ = Describe("0-RTT", func() {
 			defer close(received)
 			conn, err := ln.Accept(context.Background())
 			Expect(err).ToNot(HaveOccurred())
-			receivedMessage, err = conn.ReceiveMessage(context.Background())
+			receivedMessage, err = conn.ReceiveDatagram(context.Background())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(conn.ConnectionState().Used0RTT).To(BeTrue())
 		}()
@@ -844,14 +872,14 @@ var _ = Describe("0-RTT", func() {
 		)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(conn.ConnectionState().SupportsDatagrams).To(BeTrue())
-		Expect(conn.SendMessage(sentMessage)).To(Succeed())
+		Expect(conn.SendDatagram(sentMessage)).To(Succeed())
 		<-conn.HandshakeComplete()
 		<-received
 
 		Expect(conn.ConnectionState().Used0RTT).To(BeTrue())
 		Expect(receivedMessage).To(Equal(sentMessage))
 		Expect(conn.CloseWithError(0, "")).To(Succeed())
-		num0RTT := atomic.LoadUint32(num0RTTPackets)
+		num0RTT := num0RTTPackets.Load()
 		fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 		Expect(num0RTT).ToNot(BeZero())
 		zeroRTTPackets := get0RTTPackets(counter.getRcvdLongHeaderPackets())
@@ -884,7 +912,7 @@ var _ = Describe("0-RTT", func() {
 			defer GinkgoRecover()
 			conn, err := ln.Accept(context.Background())
 			Expect(err).ToNot(HaveOccurred())
-			_, err = conn.ReceiveMessage(context.Background())
+			_, err = conn.ReceiveDatagram(context.Background())
 			Expect(err.Error()).To(Equal("datagram support disabled"))
 			<-conn.HandshakeComplete()
 			Expect(conn.ConnectionState().Used0RTT).To(BeFalse())
@@ -900,13 +928,13 @@ var _ = Describe("0-RTT", func() {
 		Expect(err).ToNot(HaveOccurred())
 		// the client can temporarily send datagrams but the server doesn't process them.
 		Expect(conn.ConnectionState().SupportsDatagrams).To(BeTrue())
-		Expect(conn.SendMessage(make([]byte, 100))).To(Succeed())
+		Expect(conn.SendDatagram(make([]byte, 100))).To(Succeed())
 		<-conn.HandshakeComplete()
 
 		Expect(conn.ConnectionState().SupportsDatagrams).To(BeFalse())
 		Expect(conn.ConnectionState().Used0RTT).To(BeFalse())
 		Expect(conn.CloseWithError(0, "")).To(Succeed())
-		num0RTT := atomic.LoadUint32(num0RTTPackets)
+		num0RTT := num0RTTPackets.Load()
 		fmt.Fprintf(GinkgoWriter, "Sent %d 0-RTT packets.", num0RTT)
 		Expect(num0RTT).ToNot(BeZero())
 		Expect(get0RTTPackets(counter.getRcvdLongHeaderPackets())).To(BeEmpty())

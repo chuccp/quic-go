@@ -13,6 +13,9 @@ jobs:
           - os: "macos"
             go: "1.21.x"
     runs-on: ${{ fromJSON(vars[format('INTEGRATION_RUNNER_{0}', matrix.os)] || format('"{0}-latest"', matrix.os)) }}
+    defaults:
+      run:
+        shell: bash # by default Windows uses PowerShell, which uses a different syntax for setting environment variables
     env:
       DEBUG: false # set this to true to export qlogs and save them as artifacts
       TIMESCALE_FACTOR: 3
@@ -56,7 +59,8 @@ jobs:
           go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/self -- ${{ env.QLOGFLAG }}
       - name: save qlogs
         if: ${{ always() && env.DEBUG == 'true' }}
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
-          name: qlogs
+          name: qlogs-${{ matrix.os }}-go${{ matrix.go }}
           path: integrationtests/self/*.qlog
+          retention-days: 7
