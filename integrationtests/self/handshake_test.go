@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -14,6 +15,7 @@ import (
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/qerr"
 	"github.com/quic-go/quic-go/internal/qtls"
+	"github.com/quic-go/quic-go/logging"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -81,6 +83,26 @@ var _ = Describe("Handshake tests", func() {
 			}
 		}()
 	}
+
+	It("returns the context cancellation error on timeouts", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(20*time.Millisecond))
+		defer cancel()
+		errChan := make(chan error, 1)
+		go func() {
+			_, err := quic.DialAddr(
+				ctx,
+				"localhost:1234", // nobody is listening on this port, but we're going to cancel this dial anyway
+				getTLSClientConfig(),
+				getQuicConfig(nil),
+			)
+			errChan <- err
+		}()
+
+		var err error
+		Eventually(errChan).Should(Receive(&err))
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(context.DeadlineExceeded))
+	})
 
 	It("returns the cancellation reason when a dial is canceled", func() {
 		ctx, cancel := context.WithCancelCause(context.Background())
@@ -281,7 +303,7 @@ var _ = Describe("Handshake tests", func() {
 		})
 	})
 
-	Context("rate limiting", func() {
+	Context("queuening and accepting connections", func() {
 		var (
 			server *quic.Listener
 			pconn  net.PacketConn
@@ -323,8 +345,11 @@ var _ = Describe("Handshake tests", func() {
 			}
 			time.Sleep(25 * time.Millisecond) // wait a bit for the connection to be queued
 
-			_, err := dial()
-			Expect(err).To(HaveOccurred())
+			conn, err := dial()
+			Expect(err).ToNot(HaveOccurred())
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_, err = conn.AcceptStream(ctx)
 			var transportErr *quic.TransportError
 			Expect(errors.As(err, &transportErr)).To(BeTrue())
 			Expect(transportErr.ErrorCode).To(Equal(quic.ConnectionRefused))
@@ -333,18 +358,21 @@ var _ = Describe("Handshake tests", func() {
 			_, err = server.Accept(context.Background())
 			Expect(err).ToNot(HaveOccurred())
 			// dial again, and expect that this dial succeeds
-			conn, err := dial()
+			conn2, err := dial()
 			Expect(err).ToNot(HaveOccurred())
-			defer conn.CloseWithError(0, "")
+			defer conn2.CloseWithError(0, "")
 			time.Sleep(25 * time.Millisecond) // wait a bit for the connection to be queued
 
-			_, err = dial()
-			Expect(err).To(HaveOccurred())
+			conn3, err := dial()
+			Expect(err).ToNot(HaveOccurred())
+			ctx, cancel = context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_, err = conn3.AcceptStream(ctx)
 			Expect(errors.As(err, &transportErr)).To(BeTrue())
 			Expect(transportErr.ErrorCode).To(Equal(quic.ConnectionRefused))
 		})
 
-		It("removes closed connections from the accept queue", func() {
+		It("also returns closed connections from the accept queue", func() {
 			firstConn, err := dial()
 			Expect(err).ToNot(HaveOccurred())
 
@@ -355,27 +383,221 @@ var _ = Describe("Handshake tests", func() {
 			}
 			time.Sleep(scaleDuration(20 * time.Millisecond)) // wait a bit for the connection to be queued
 
-			_, err = dial()
-			Expect(err).To(HaveOccurred())
+			conn, err := dial()
+			Expect(err).ToNot(HaveOccurred())
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_, err = conn.AcceptStream(ctx)
 			var transportErr *quic.TransportError
 			Expect(errors.As(err, &transportErr)).To(BeTrue())
 			Expect(transportErr.ErrorCode).To(Equal(quic.ConnectionRefused))
 
 			// Now close the one of the connection that are waiting to be accepted.
-			// This should free one spot in the queue.
-			Expect(firstConn.CloseWithError(0, ""))
+			const appErrCode quic.ApplicationErrorCode = 12345
+			Expect(firstConn.CloseWithError(appErrCode, ""))
 			Eventually(firstConn.Context().Done()).Should(BeClosed())
 			time.Sleep(scaleDuration(200 * time.Millisecond))
 
-			// dial again, and expect that this dial succeeds
-			_, err = dial()
+			// dial again, and expect that this fails again
+			conn2, err := dial()
 			Expect(err).ToNot(HaveOccurred())
-			time.Sleep(scaleDuration(20 * time.Millisecond)) // wait a bit for the connection to be queued
-
-			_, err = dial()
-			Expect(err).To(HaveOccurred())
+			ctx, cancel = context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_, err = conn2.AcceptStream(ctx)
 			Expect(errors.As(err, &transportErr)).To(BeTrue())
 			Expect(transportErr.ErrorCode).To(Equal(quic.ConnectionRefused))
+
+			// now accept all connections
+			var closedConn quic.Connection
+			for i := 0; i < protocol.MaxAcceptQueueSize; i++ {
+				conn, err := server.Accept(context.Background())
+				Expect(err).ToNot(HaveOccurred())
+				if conn.Context().Err() != nil {
+					if closedConn != nil {
+						Fail("only expected a single closed connection")
+					}
+					closedConn = conn
+				}
+			}
+			Expect(closedConn).ToNot(BeNil()) // there should be exactly one closed connection
+			_, err = closedConn.AcceptStream(context.Background())
+			var appErr *quic.ApplicationError
+			Expect(errors.As(err, &appErr)).To(BeTrue())
+			Expect(appErr.ErrorCode).To(Equal(appErrCode))
+		})
+
+		It("closes handshaking connections when the server is closed", func() {
+			laddr, err := net.ResolveUDPAddr("udp", "localhost:0")
+			Expect(err).ToNot(HaveOccurred())
+			udpConn, err := net.ListenUDP("udp", laddr)
+			Expect(err).ToNot(HaveOccurred())
+			tr := quic.Transport{
+				Conn: udpConn,
+			}
+			defer tr.Close()
+			tlsConf := &tls.Config{}
+			done := make(chan struct{})
+			tlsConf.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+				<-done
+				return nil, errors.New("closed")
+			}
+			ln, err := tr.Listen(tlsConf, getQuicConfig(nil))
+			Expect(err).ToNot(HaveOccurred())
+
+			errChan := make(chan error, 1)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			go func() {
+				defer GinkgoRecover()
+				_, err := quic.DialAddr(ctx, ln.Addr().String(), getTLSClientConfig(), getQuicConfig(nil))
+				errChan <- err
+			}()
+			time.Sleep(scaleDuration(20 * time.Millisecond)) // wait a bit for the connection to be queued
+			Expect(ln.Close()).To(Succeed())
+			close(done)
+			err = <-errChan
+			var transportErr *quic.TransportError
+			Expect(errors.As(err, &transportErr)).To(BeTrue())
+			Expect(transportErr.ErrorCode).To(Equal(quic.ConnectionRefused))
+		})
+	})
+
+	Context("limiting handshakes", func() {
+		var conn *net.UDPConn
+
+		BeforeEach(func() {
+			addr, err := net.ResolveUDPAddr("udp", "localhost:0")
+			Expect(err).ToNot(HaveOccurred())
+			conn, err = net.ListenUDP("udp", addr)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		AfterEach(func() { conn.Close() })
+
+		It("sends a Retry when the number of handshakes reaches MaxUnvalidatedHandshakes", func() {
+			const limit = 3
+			tr := quic.Transport{
+				Conn:                     conn,
+				MaxUnvalidatedHandshakes: limit,
+			}
+			defer tr.Close()
+
+			// Block all handshakes.
+			handshakes := make(chan struct{})
+			var tlsConf tls.Config
+			tlsConf.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				handshakes <- struct{}{}
+				return getTLSConfig(), nil
+			}
+			ln, err := tr.Listen(&tlsConf, getQuicConfig(nil))
+			Expect(err).ToNot(HaveOccurred())
+			defer ln.Close()
+
+			const additional = 2
+			results := make([]struct{ retry, closed atomic.Bool }, limit+additional)
+			// Dial the server from multiple clients. All handshakes will get blocked on the handshakes channel.
+			// Since we're dialing limit+2 times, we expect limit handshakes to go through with a Retry, and
+			// exactly 2 to experience a Retry.
+			for i := 0; i < limit+additional; i++ {
+				go func(index int) {
+					defer GinkgoRecover()
+					quicConf := getQuicConfig(&quic.Config{
+						Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+							return &logging.ConnectionTracer{
+								ReceivedRetry:    func(*logging.Header) { results[index].retry.Store(true) },
+								ClosedConnection: func(error) { results[index].closed.Store(true) },
+							}
+						},
+					})
+					conn, err := quic.DialAddr(context.Background(), ln.Addr().String(), getTLSClientConfig(), quicConf)
+					Expect(err).ToNot(HaveOccurred())
+					conn.CloseWithError(0, "")
+				}(i)
+			}
+			numRetries := func() (n int) {
+				for i := 0; i < limit+additional; i++ {
+					if results[i].retry.Load() {
+						n++
+					}
+				}
+				return
+			}
+			numClosed := func() (n int) {
+				for i := 0; i < limit+2; i++ {
+					if results[i].closed.Load() {
+						n++
+					}
+				}
+				return
+			}
+			Eventually(numRetries).Should(Equal(additional))
+			// allow the handshakes to complete
+			for i := 0; i < limit+additional; i++ {
+				Eventually(handshakes).Should(Receive())
+			}
+			Eventually(numClosed).Should(Equal(limit + additional))
+			Expect(numRetries()).To(Equal(additional)) // just to be on the safe side
+		})
+
+		It("rejects connections when the number of handshakes reaches MaxHandshakes", func() {
+			const limit = 3
+			tr := quic.Transport{
+				Conn:          conn,
+				MaxHandshakes: limit,
+			}
+			defer tr.Close()
+
+			// Block all handshakes.
+			handshakes := make(chan struct{})
+			var tlsConf tls.Config
+			tlsConf.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				handshakes <- struct{}{}
+				return getTLSConfig(), nil
+			}
+			ln, err := tr.Listen(&tlsConf, getQuicConfig(nil))
+			Expect(err).ToNot(HaveOccurred())
+			defer ln.Close()
+
+			const additional = 2
+			// Dial the server from multiple clients. All handshakes will get blocked on the handshakes channel.
+			// Since we're dialing limit+2 times, we expect limit handshakes to go through with a Retry, and
+			// exactly 2 to experience a Retry.
+			var numSuccessful, numFailed atomic.Int32
+			for i := 0; i < limit+additional; i++ {
+				go func() {
+					defer GinkgoRecover()
+					quicConf := getQuicConfig(&quic.Config{
+						Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+							return &logging.ConnectionTracer{
+								ReceivedRetry: func(*logging.Header) { Fail("didn't expect any Retry") },
+							}
+						},
+					})
+					conn, err := quic.DialAddr(context.Background(), ln.Addr().String(), getTLSClientConfig(), quicConf)
+					if err != nil {
+						var transportErr *quic.TransportError
+						if !errors.As(err, &transportErr) || transportErr.ErrorCode != qerr.ConnectionRefused {
+							Fail(fmt.Sprintf("expected CONNECTION_REFUSED error, got %v", err))
+						}
+						numFailed.Add(1)
+						return
+					}
+					numSuccessful.Add(1)
+					conn.CloseWithError(0, "")
+				}()
+			}
+			Eventually(func() int { return int(numFailed.Load()) }).Should(Equal(additional))
+			// allow the handshakes to complete
+			for i := 0; i < limit; i++ {
+				Eventually(handshakes).Should(Receive())
+			}
+			Eventually(func() int { return int(numSuccessful.Load()) }).Should(Equal(limit))
+
+			// make sure that the server is reachable again after these handshakes have completed
+			go func() { <-handshakes }() // allow this handshake to complete immediately
+			conn, err := quic.DialAddr(context.Background(), ln.Addr().String(), getTLSClientConfig(), getQuicConfig(nil))
+			Expect(err).ToNot(HaveOccurred())
+			conn.CloseWithError(0, "")
 		})
 	})
 
@@ -479,14 +701,24 @@ var _ = Describe("Handshake tests", func() {
 
 		It("rejects invalid Retry token with the INVALID_TOKEN error", func() {
 			const rtt = 10 * time.Millisecond
-			serverConfig.RequireAddressValidation = func(net.Addr) bool { return true }
+
 			// The validity period of the retry token is the handshake timeout,
 			// which is twice the handshake idle timeout.
 			// By setting the handshake timeout shorter than the RTT, the token will have expired by the time
 			// it reaches the server.
 			serverConfig.HandshakeIdleTimeout = rtt / 5
 
-			server, err := quic.ListenAddr("localhost:0", getTLSConfig(), serverConfig)
+			laddr, err := net.ResolveUDPAddr("udp", "localhost:0")
+			Expect(err).ToNot(HaveOccurred())
+			udpConn, err := net.ListenUDP("udp", laddr)
+			Expect(err).ToNot(HaveOccurred())
+			defer udpConn.Close()
+			tr := &quic.Transport{
+				Conn:                     udpConn,
+				MaxUnvalidatedHandshakes: -1,
+			}
+			defer tr.Close()
+			server, err := tr.Listen(getTLSConfig(), serverConfig)
 			Expect(err).ToNot(HaveOccurred())
 			defer server.Close()
 

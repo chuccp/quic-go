@@ -24,15 +24,14 @@ var ErrServerClosed = errors.New("quic: server closed")
 // packetHandler handles packets
 type packetHandler interface {
 	handlePacket(receivedPacket)
-	shutdown()
 	destroy(error)
-	getPerspective() protocol.Perspective
+	closeWithTransportError(qerr.TransportErrorCode)
 }
 
 type packetHandlerManager interface {
 	Get(protocol.ConnectionID) (packetHandler, bool)
 	GetByResetToken(protocol.StatelessResetToken) (packetHandler, bool)
-	AddWithConnID(protocol.ConnectionID, protocol.ConnectionID, func() (packetHandler, bool)) bool
+	AddWithConnID(destConnID, newConnID protocol.ConnectionID, h packetHandler) bool
 	Close(error)
 	connRunner
 }
@@ -41,11 +40,9 @@ type quicConn interface {
 	EarlyConnection
 	earlyConnReady() <-chan struct{}
 	handlePacket(receivedPacket)
-	GetVersion() protocol.VersionNumber
-	getPerspective() protocol.Perspective
 	run() error
 	destroy(error)
-	shutdown()
+	closeWithTransportError(TransportErrorCode)
 }
 
 type zeroRTTQueue struct {
@@ -98,7 +95,7 @@ type baseServer struct {
 		*logging.ConnectionTracer,
 		uint64,
 		utils.Logger,
-		protocol.VersionNumber,
+		protocol.Version,
 	) quicConn
 
 	closeOnce sync.Once
@@ -111,8 +108,12 @@ type baseServer struct {
 	connectionRefusedQueue  chan rejectedPacket
 	retryQueue              chan rejectedPacket
 
-	connQueue    chan quicConn
-	connQueueLen int32 // to be used as an atomic
+	maxNumHandshakesUnvalidated int
+	maxNumHandshakesTotal       int
+	numHandshakesUnvalidated    atomic.Int64
+	numHandshakesValidated      atomic.Int64
+
+	connQueue chan quicConn
 
 	tracer *logging.Tracer
 
@@ -240,31 +241,34 @@ func newServer(
 	onClose func(),
 	tokenGeneratorKey TokenGeneratorKey,
 	maxTokenAge time.Duration,
+	maxNumHandshakesUnvalidated, maxNumHandshakesTotal int,
 	disableVersionNegotiation bool,
 	acceptEarly bool,
 ) *baseServer {
 	s := &baseServer{
-		conn:                      conn,
-		tlsConf:                   tlsConf,
-		config:                    config,
-		tokenGenerator:            handshake.NewTokenGenerator(tokenGeneratorKey),
-		maxTokenAge:               maxTokenAge,
-		connIDGenerator:           connIDGenerator,
-		connHandler:               connHandler,
-		connQueue:                 make(chan quicConn),
-		errorChan:                 make(chan struct{}),
-		running:                   make(chan struct{}),
-		receivedPackets:           make(chan receivedPacket, protocol.MaxServerUnprocessedPackets),
-		versionNegotiationQueue:   make(chan receivedPacket, 4),
-		invalidTokenQueue:         make(chan rejectedPacket, 4),
-		connectionRefusedQueue:    make(chan rejectedPacket, 4),
-		retryQueue:                make(chan rejectedPacket, 8),
-		newConn:                   newConnection,
-		tracer:                    tracer,
-		logger:                    utils.DefaultLogger.WithPrefix("server"),
-		acceptEarlyConns:          acceptEarly,
-		disableVersionNegotiation: disableVersionNegotiation,
-		onClose:                   onClose,
+		conn:                        conn,
+		tlsConf:                     tlsConf,
+		config:                      config,
+		tokenGenerator:              handshake.NewTokenGenerator(tokenGeneratorKey),
+		maxTokenAge:                 maxTokenAge,
+		maxNumHandshakesUnvalidated: maxNumHandshakesUnvalidated,
+		maxNumHandshakesTotal:       maxNumHandshakesTotal,
+		connIDGenerator:             connIDGenerator,
+		connHandler:                 connHandler,
+		connQueue:                   make(chan quicConn, protocol.MaxAcceptQueueSize),
+		errorChan:                   make(chan struct{}),
+		running:                     make(chan struct{}),
+		receivedPackets:             make(chan receivedPacket, protocol.MaxServerUnprocessedPackets),
+		versionNegotiationQueue:     make(chan receivedPacket, 4),
+		invalidTokenQueue:           make(chan rejectedPacket, 4),
+		connectionRefusedQueue:      make(chan rejectedPacket, 4),
+		retryQueue:                  make(chan rejectedPacket, 8),
+		newConn:                     newConnection,
+		tracer:                      tracer,
+		logger:                      utils.DefaultLogger.WithPrefix("server"),
+		acceptEarlyConns:            acceptEarly,
+		disableVersionNegotiation:   disableVersionNegotiation,
+		onClose:                     onClose,
 	}
 	if acceptEarly {
 		s.zeroRTTQueues = map[protocol.ConnectionID]*zeroRTTQueue{}
@@ -322,7 +326,6 @@ func (s *baseServer) accept(ctx context.Context) (quicConn, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case conn := <-s.connQueue:
-		atomic.AddInt32(&s.connQueueLen, -1)
 		return conn, nil
 	case <-s.errorChan:
 		return nil, s.closeErr
@@ -542,10 +545,10 @@ func (s *baseServer) validateToken(token *handshake.Token, addr net.Addr) bool {
 
 func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error {
 	if len(hdr.Token) == 0 && hdr.DestConnectionID.Len() < protocol.MinConnectionIDLenInitial {
-		p.buffer.Release()
 		if s.tracer != nil && s.tracer.DroppedPacket != nil {
 			s.tracer.DroppedPacket(p.remoteAddr, logging.PacketTypeInitial, p.Size(), logging.PacketDropUnexpectedPacket)
 		}
+		p.buffer.Release()
 		return errors.New("too short connection ID")
 	}
 
@@ -573,8 +576,8 @@ func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error
 		}
 	}
 
-	clientAddrIsValid := s.validateToken(token, p.remoteAddr)
-	if token != nil && !clientAddrIsValid {
+	clientAddrValidated := s.validateToken(token, p.remoteAddr)
+	if token != nil && !clientAddrValidated {
 		// For invalid and expired non-retry tokens, we don't send an INVALID_TOKEN error.
 		// We just ignore them, and act as if there was no token on this packet at all.
 		// This also means we might send a Retry later.
@@ -593,24 +596,31 @@ func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error
 			return nil
 		}
 	}
-	if token == nil && s.config.RequireAddressValidation(p.remoteAddr) {
+
+	// Until the next call to handleInitialImpl, these numbers are guaranteed to not increase.
+	// They might decrease if another connection completes the handshake.
+	numHandshakesUnvalidated := s.numHandshakesUnvalidated.Load()
+	numHandshakesValidated := s.numHandshakesValidated.Load()
+
+	// Check the total handshake limit first. It's better to reject than to initiate a retry.
+	if total := numHandshakesUnvalidated + numHandshakesValidated; total >= int64(s.maxNumHandshakesTotal) {
+		s.logger.Debugf("Rejecting new connection. Server currently busy. Currently handshaking: %d (max %d)", total, s.maxNumHandshakesTotal)
+		delete(s.zeroRTTQueues, hdr.DestConnectionID)
+		select {
+		case s.connectionRefusedQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
+		default:
+			// drop packet if we can't send out the CONNECTION_REFUSED fast enough
+			p.buffer.Release()
+		}
+		return nil
+	}
+	if token == nil && numHandshakesUnvalidated >= int64(s.maxNumHandshakesUnvalidated) {
 		// Retry invalidates all 0-RTT packets sent.
 		delete(s.zeroRTTQueues, hdr.DestConnectionID)
 		select {
 		case s.retryQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
 		default:
 			// drop packet if we can't send out Retry packets fast enough
-			p.buffer.Release()
-		}
-		return nil
-	}
-
-	if queueLen := atomic.LoadInt32(&s.connQueueLen); queueLen >= protocol.MaxAcceptQueueSize {
-		s.logger.Debugf("Rejecting new connection. Server currently busy. Accept queue length: %d (max %d)", queueLen, protocol.MaxAcceptQueueSize)
-		select {
-		case s.connectionRefusedQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
-		default:
-			// drop packet if we can't send out the CONNECTION_REFUSED fast enough
 			p.buffer.Release()
 		}
 		return nil
@@ -623,103 +633,118 @@ func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error
 	s.logger.Debugf("Changing connection ID to %s.", connID)
 	var conn quicConn
 	tracingID := nextConnTracingID()
-	if added := s.connHandler.AddWithConnID(hdr.DestConnectionID, connID, func() (packetHandler, bool) {
-		config := s.config
-		if s.config.GetConfigForClient != nil {
-			conf, err := s.config.GetConfigForClient(&ClientHelloInfo{RemoteAddr: p.remoteAddr})
-			if err != nil {
-				s.logger.Debugf("Rejecting new connection due to GetConfigForClient callback")
-				return nil, false
-			}
-			config = populateConfig(conf)
-		}
-		var tracer *logging.ConnectionTracer
-		if config.Tracer != nil {
-			// Use the same connection ID that is passed to the client's GetLogWriter callback.
-			connID := hdr.DestConnectionID
-			if origDestConnID.Len() > 0 {
-				connID = origDestConnID
-			}
-			tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, connID)
-		}
-		conn = s.newConn(
-			newSendConn(s.conn, p.remoteAddr, p.info, s.logger),
-			s.connHandler,
-			origDestConnID,
-			retrySrcConnID,
-			hdr.DestConnectionID,
-			hdr.SrcConnectionID,
-			connID,
-			s.connIDGenerator,
-			s.connHandler.GetStatelessResetToken(connID),
-			config,
-			s.tlsConf,
-			s.tokenGenerator,
-			clientAddrIsValid,
-			tracer,
-			tracingID,
-			s.logger,
-			hdr.Version,
-		)
-		conn.handlePacket(p)
-
-		if q, ok := s.zeroRTTQueues[hdr.DestConnectionID]; ok {
-			for _, p := range q.packets {
-				conn.handlePacket(p)
-			}
+	config := s.config
+	if s.config.GetConfigForClient != nil {
+		conf, err := s.config.GetConfigForClient(&ClientHelloInfo{RemoteAddr: p.remoteAddr})
+		if err != nil {
+			s.logger.Debugf("Rejecting new connection due to GetConfigForClient callback")
 			delete(s.zeroRTTQueues, hdr.DestConnectionID)
+			select {
+			case s.connectionRefusedQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
+			default:
+				// drop packet if we can't send out the CONNECTION_REFUSED fast enough
+				p.buffer.Release()
+			}
+			return nil
 		}
-
-		return conn, true
-	}); !added {
-		select {
-		case s.connectionRefusedQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
-		default:
-			// drop packet if we can't send out the CONNECTION_REFUSED fast enough
-			p.buffer.Release()
+		config = populateConfig(conf)
+	}
+	var tracer *logging.ConnectionTracer
+	if config.Tracer != nil {
+		// Use the same connection ID that is passed to the client's GetLogWriter callback.
+		connID := hdr.DestConnectionID
+		if origDestConnID.Len() > 0 {
+			connID = origDestConnID
 		}
+		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, connID)
+	}
+	conn = s.newConn(
+		newSendConn(s.conn, p.remoteAddr, p.info, s.logger),
+		s.connHandler,
+		origDestConnID,
+		retrySrcConnID,
+		hdr.DestConnectionID,
+		hdr.SrcConnectionID,
+		connID,
+		s.connIDGenerator,
+		s.connHandler.GetStatelessResetToken(connID),
+		config,
+		s.tlsConf,
+		s.tokenGenerator,
+		clientAddrValidated,
+		tracer,
+		tracingID,
+		s.logger,
+		hdr.Version,
+	)
+	conn.handlePacket(p)
+	// Adding the connection will fail if the client's chosen Destination Connection ID is already in use.
+	// This is very unlikely: Even if an attacker chooses a connection ID that's already in use,
+	// under normal circumstances the packet would just be routed to that connection.
+	// The only time this collision will occur if we receive the two Initial packets at the same time.
+	if added := s.connHandler.AddWithConnID(hdr.DestConnectionID, connID, conn); !added {
+		delete(s.zeroRTTQueues, hdr.DestConnectionID)
+		conn.closeWithTransportError(qerr.ConnectionRefused)
 		return nil
+	}
+	// Pass queued 0-RTT to the newly established connection.
+	if q, ok := s.zeroRTTQueues[hdr.DestConnectionID]; ok {
+		for _, p := range q.packets {
+			conn.handlePacket(p)
+		}
+		delete(s.zeroRTTQueues, hdr.DestConnectionID)
+	}
+
+	if clientAddrValidated {
+		s.numHandshakesValidated.Add(1)
+	} else {
+		s.numHandshakesUnvalidated.Add(1)
 	}
 	go conn.run()
-	go s.handleNewConn(conn)
-	if conn == nil {
-		p.buffer.Release()
-		return nil
-	}
+	go func() {
+		completed := s.handleNewConn(conn)
+		if clientAddrValidated {
+			if s.numHandshakesValidated.Add(-1) < 0 {
+				panic("server BUG: number of validated handshakes negative")
+			}
+		} else if s.numHandshakesUnvalidated.Add(-1) < 0 {
+			panic("server BUG: number of unvalidated handshakes negative")
+		}
+		if !completed {
+			return
+		}
+
+		select {
+		case s.connQueue <- conn:
+		default:
+			conn.closeWithTransportError(ConnectionRefused)
+		}
+	}()
 	return nil
 }
 
-func (s *baseServer) handleNewConn(conn quicConn) {
-	connCtx := conn.Context()
+func (s *baseServer) handleNewConn(conn quicConn) bool {
 	if s.acceptEarlyConns {
 		// wait until the early connection is ready, the handshake fails, or the server is closed
 		select {
 		case <-s.errorChan:
-			conn.destroy(&qerr.TransportError{ErrorCode: ConnectionRefused})
-			return
+			conn.closeWithTransportError(ConnectionRefused)
+			return false
+		case <-conn.Context().Done():
+			return false
 		case <-conn.earlyConnReady():
-		case <-connCtx.Done():
-			return
-		}
-	} else {
-		// wait until the handshake is complete (or fails)
-		select {
-		case <-s.errorChan:
-			conn.destroy(&qerr.TransportError{ErrorCode: ConnectionRefused})
-			return
-		case <-conn.HandshakeComplete():
-		case <-connCtx.Done():
-			return
+			return true
 		}
 	}
-
-	atomic.AddInt32(&s.connQueueLen, 1)
+	// wait until the handshake completes, fails, or the server is closed
 	select {
-	case s.connQueue <- conn:
-		// blocks until the connection is accepted
-	case <-connCtx.Done():
-		atomic.AddInt32(&s.connQueueLen, -1)
-		// don't pass connections that were already closed to Accept()
+	case <-s.errorChan:
+		conn.closeWithTransportError(ConnectionRefused)
+		return false
+	case <-conn.Context().Done():
+		return false
+	case <-conn.HandshakeComplete():
+		return true
 	}
 }
 

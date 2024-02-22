@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,18 @@ import (
 )
 
 var errListenerAlreadySet = errors.New("listener already set")
+
+const (
+	// defaultMaxNumUnvalidatedHandshakes is the default value for Transport.MaxUnvalidatedHandshakes.
+	defaultMaxNumUnvalidatedHandshakes = 128
+	// defaultMaxNumHandshakes is the default value for Transport.MaxHandshakes.
+	// It's not clear how to choose a reasonable value that works for all use cases.
+	// In production, implementations should:
+	// 1. Choose a lower value.
+	// 2. Implement some kind of IP-address based filtering using the Config.GetConfigForClient
+	//    callback in order to prevent flooding attacks from a single / small number of IP addresses.
+	defaultMaxNumHandshakes = math.MaxInt32
+)
 
 // The Transport is the central point to manage incoming and outgoing QUIC connections.
 // QUIC demultiplexes connections based on their QUIC Connection IDs, not based on the 4-tuple.
@@ -41,7 +54,8 @@ type Transport struct {
 	Conn net.PacketConn
 
 	// The length of the connection ID in bytes.
-	// It can be 0, or any value between 4 and 18.
+	// It can be any value between 1 and 20.
+	// Due to the increased risk of collisions, it is not recommended to use connection IDs shorter than 4 bytes.
 	// If unset, a 4 byte connection ID will be used.
 	ConnectionIDLength int
 
@@ -77,7 +91,27 @@ type Transport struct {
 	// It has no effect for clients.
 	DisableVersionNegotiationPackets bool
 
+	// MaxUnvalidatedHandshakes is the maximum number of concurrent incoming QUIC handshakes
+	// originating from unvalidated source addresses.
+	// If the number of handshakes from unvalidated addresses reaches this number, new incoming
+	// connection attempts will need to proof reachability at the respective source address using the
+	// Retry mechanism, as described in RFC 9000 section 8.1.2.
+	// Validating the source address adds one additional network roundtrip to the handshake.
+	// If unset, a default value of 128 will be used.
+	// When set to a negative value, every connection attempt will need to validate the source address.
+	// It does not make sense to set this value higher than MaxHandshakes.
+	MaxUnvalidatedHandshakes int
+	// MaxHandshakes is the maximum number of concurrent incoming handshakes, both from validated
+	// and unvalidated source addresses.
+	// If unset, the number of concurrent handshakes will not be limited.
+	// Applications should choose a reasonable value based on their thread model, and consider
+	// implementing IP-based rate limiting using Config.GetConfigForClient.
+	// If the number of handshakes reaches this number, new connection attempts will be rejected by
+	// terminating the connection attempt using a CONNECTION_REFUSED error.
+	MaxHandshakes int
+
 	// A Tracer traces events that don't belong to a single QUIC connection.
+	// Tracer.Close is called when the transport is closed.
 	Tracer *logging.Tracer
 
 	handlerMap packetHandlerManager
@@ -147,9 +181,17 @@ func (t *Transport) createServer(tlsConf *tls.Config, conf *Config, allow0RTT bo
 	if t.server != nil {
 		return nil, errListenerAlreadySet
 	}
-	conf = populateServerConfig(conf)
+	conf = populateConfig(conf)
 	if err := t.init(false); err != nil {
 		return nil, err
+	}
+	maxUnvalidatedHandshakes := t.MaxUnvalidatedHandshakes
+	if maxUnvalidatedHandshakes == 0 {
+		maxUnvalidatedHandshakes = defaultMaxNumUnvalidatedHandshakes
+	}
+	maxHandshakes := t.MaxHandshakes
+	if maxHandshakes == 0 {
+		maxHandshakes = defaultMaxNumHandshakes
 	}
 	s := newServer(
 		t.conn,
@@ -161,6 +203,8 @@ func (t *Transport) createServer(tlsConf *tls.Config, conf *Config, allow0RTT bo
 		t.closeServer,
 		*t.TokenGeneratorKey,
 		t.MaxTokenAge,
+		maxUnvalidatedHandshakes,
+		maxHandshakes,
 		t.DisableVersionNegotiationPackets,
 		allow0RTT,
 	)
@@ -323,6 +367,9 @@ func (t *Transport) close(e error) {
 	if t.server != nil {
 		t.server.close(e, false)
 	}
+	if t.Tracer != nil && t.Tracer.Close != nil {
+		t.Tracer.Close()
+	}
 	t.closed = true
 }
 
@@ -379,11 +426,19 @@ func (t *Transport) handlePacket(p receivedPacket) {
 		return
 	}
 
-	if isStatelessReset := t.maybeHandleStatelessReset(p.data); isStatelessReset {
-		return
-	}
+	// If there's a connection associated with the connection ID, pass the packet there.
 	if handler, ok := t.handlerMap.Get(connID); ok {
 		handler.handlePacket(p)
+		return
+	}
+	// RFC 9000 section 10.3.1 requires that the stateless reset detection logic is run for both
+	// packets that cannot be associated with any connections, and for packets that can't be decrypted.
+	// We deviate from the RFC and ignore the latter: If a packet's connection ID is associated with an
+	// existing connection, it is dropped there if if it can't be decrypted.
+	// Stateless resets use random connection IDs, and at reasonable connection ID lengths collisions are
+	// exceedingly rare. In the unlikely event that a stateless reset is misrouted to an existing connection,
+	// it is to be expected that the next stateless reset will be correctly detected.
+	if isStatelessReset := t.maybeHandleStatelessReset(p.data); isStatelessReset {
 		return
 	}
 	if !wire.IsLongHeaderPacket(p.data[0]) {

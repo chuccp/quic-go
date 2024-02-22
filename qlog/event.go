@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -344,9 +345,9 @@ func (e eventPacketLost) MarshalJSONObject(enc *gojay.Encoder) {
 }
 
 type eventKeyUpdated struct {
-	Trigger    keyUpdateTrigger
-	KeyType    keyType
-	Generation protocol.KeyPhase
+	Trigger  keyUpdateTrigger
+	KeyType  keyType
+	KeyPhase protocol.KeyPhase
 	// we don't log the keys here, so we don't need `old` and `new`.
 }
 
@@ -358,13 +359,13 @@ func (e eventKeyUpdated) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.StringKey("trigger", e.Trigger.String())
 	enc.StringKey("key_type", e.KeyType.String())
 	if e.KeyType == keyTypeClient1RTT || e.KeyType == keyTypeServer1RTT {
-		enc.Uint64Key("generation", uint64(e.Generation))
+		enc.Uint64Key("key_phase", uint64(e.KeyPhase))
 	}
 }
 
 type eventKeyDiscarded struct {
-	KeyType    keyType
-	Generation protocol.KeyPhase
+	KeyType  keyType
+	KeyPhase protocol.KeyPhase
 }
 
 func (e eventKeyDiscarded) Category() category { return categorySecurity }
@@ -377,7 +378,7 @@ func (e eventKeyDiscarded) MarshalJSONObject(enc *gojay.Encoder) {
 	}
 	enc.StringKey("key_type", e.KeyType.String())
 	if e.KeyType == keyTypeClient1RTT || e.KeyType == keyTypeServer1RTT {
-		enc.Uint64Key("generation", uint64(e.Generation))
+		enc.Uint64Key("key_phase", uint64(e.KeyPhase))
 	}
 }
 
@@ -456,8 +457,7 @@ func (e eventTransportParameters) MarshalJSONObject(enc *gojay.Encoder) {
 }
 
 type preferredAddress struct {
-	IPv4, IPv6          net.IP
-	PortV4, PortV6      uint16
+	IPv4, IPv6          netip.AddrPort
 	ConnectionID        protocol.ConnectionID
 	StatelessResetToken protocol.StatelessResetToken
 }
@@ -466,10 +466,10 @@ var _ gojay.MarshalerJSONObject = &preferredAddress{}
 
 func (a preferredAddress) IsNil() bool { return false }
 func (a preferredAddress) MarshalJSONObject(enc *gojay.Encoder) {
-	enc.StringKey("ip_v4", a.IPv4.String())
-	enc.Uint16Key("port_v4", a.PortV4)
-	enc.StringKey("ip_v6", a.IPv6.String())
-	enc.Uint16Key("port_v6", a.PortV6)
+	enc.StringKey("ip_v4", a.IPv4.Addr().String())
+	enc.Uint16Key("port_v4", a.IPv4.Port())
+	enc.StringKey("ip_v6", a.IPv6.Addr().String())
+	enc.Uint16Key("port_v6", a.IPv6.Port())
 	enc.StringKey("connection_id", a.ConnectionID.String())
 	enc.StringKey("stateless_reset_token", fmt.Sprintf("%x", a.StatelessResetToken))
 }

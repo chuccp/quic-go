@@ -25,7 +25,7 @@ import (
 )
 
 type unpacker interface {
-	UnpackLongHeader(hdr *wire.Header, rcvTime time.Time, data []byte, v protocol.VersionNumber) (*unpackedPacket, error)
+	UnpackLongHeader(hdr *wire.Header, rcvTime time.Time, data []byte, v protocol.Version) (*unpackedPacket, error)
 	UnpackShortHeader(rcvTime time.Time, data []byte) (protocol.PacketNumber, protocol.PacketNumberLen, protocol.KeyPhaseBit, []byte, error)
 }
 
@@ -93,7 +93,7 @@ type connRunner interface {
 	GetStatelessResetToken(protocol.ConnectionID) protocol.StatelessResetToken
 	Retire(protocol.ConnectionID)
 	Remove(protocol.ConnectionID)
-	ReplaceWithClosed([]protocol.ConnectionID, protocol.Perspective, []byte)
+	ReplaceWithClosed([]protocol.ConnectionID, []byte)
 	AddResetToken(protocol.StatelessResetToken, packetHandler)
 	RemoveResetToken(protocol.StatelessResetToken)
 }
@@ -106,7 +106,7 @@ type closeError struct {
 
 type errCloseForRecreating struct {
 	nextPacketNumber protocol.PacketNumber
-	nextVersion      protocol.VersionNumber
+	nextVersion      protocol.Version
 }
 
 func (e *errCloseForRecreating) Error() string {
@@ -128,7 +128,7 @@ type connection struct {
 	srcConnIDLen int
 
 	perspective protocol.Perspective
-	version     protocol.VersionNumber
+	version     protocol.Version
 	config      *Config
 
 	conn      sendConn
@@ -177,6 +177,7 @@ type connection struct {
 
 	earlyConnReadyChan chan struct{}
 	sentFirstPacket    bool
+	droppedInitialKeys bool
 	handshakeComplete  bool
 	handshakeConfirmed bool
 
@@ -235,7 +236,7 @@ var newConnection = func(
 	tracer *logging.ConnectionTracer,
 	tracingID uint64,
 	logger utils.Logger,
-	v protocol.VersionNumber,
+	v protocol.Version,
 ) quicConn {
 	s := &connection{
 		conn:                conn,
@@ -348,7 +349,7 @@ var newClientConnection = func(
 	tracer *logging.ConnectionTracer,
 	tracingID uint64,
 	logger utils.Logger,
-	v protocol.VersionNumber,
+	v protocol.Version,
 ) quicConn {
 	s := &connection{
 		conn:                conn,
@@ -453,7 +454,7 @@ func (s *connection) preSetup() {
 	s.handshakeStream = newCryptoStream()
 	s.sendQueue = newSendQueue(s.conn)
 	s.retransmissionQueue = newRetransmissionQueue()
-	s.frameParser = wire.NewFrameParser(s.config.EnableDatagrams)
+	s.frameParser = *wire.NewFrameParser(s.config.EnableDatagrams)
 	s.rttStats = &utils.RTTStats{}
 	s.connFlowController = flowcontrol.NewConnectionFlowController(
 		protocol.ByteCount(s.config.InitialConnectionReceiveWindow),
@@ -681,7 +682,7 @@ func (s *connection) ConnectionState() ConnectionState {
 
 // Time when the connection should time out
 func (s *connection) nextIdleTimeoutTime() time.Time {
-	idleTimeout := utils.Max(s.idleTimeout, s.rttStats.PTO(true)*3)
+	idleTimeout := max(s.idleTimeout, s.rttStats.PTO(true)*3)
 	return s.idleTimeoutStartTime().Add(idleTimeout)
 }
 
@@ -691,7 +692,7 @@ func (s *connection) nextKeepAliveTime() time.Time {
 	if s.config.KeepAlivePeriod == 0 || s.keepAlivePingSent || !s.firstAckElicitingPacketAfterIdleSentTime.IsZero() {
 		return time.Time{}
 	}
-	keepAliveInterval := utils.Max(s.keepAliveInterval, s.rttStats.PTO(true)*3/2)
+	keepAliveInterval := max(s.keepAliveInterval, s.rttStats.PTO(true)*3/2)
 	return s.lastPacketReceivedTime.Add(keepAliveInterval)
 }
 
@@ -780,7 +781,7 @@ func (s *connection) handleHandshakeConfirmed() error {
 		if maxPacketSize == 0 {
 			maxPacketSize = protocol.MaxByteCount
 		}
-		s.mtuDiscoverer.Start(utils.Min(maxPacketSize, protocol.MaxPacketBufferSize))
+		s.mtuDiscoverer.Start(min(maxPacketSize, protocol.MaxPacketBufferSize))
 	}
 	return nil
 }
@@ -1148,7 +1149,7 @@ func (s *connection) handleUnpackedLongHeaderPacket(
 	if !s.receivedFirstPacket {
 		s.receivedFirstPacket = true
 		if !s.versionNegotiated && s.tracer != nil && s.tracer.NegotiatedVersion != nil {
-			var clientVersions, serverVersions []protocol.VersionNumber
+			var clientVersions, serverVersions []protocol.Version
 			switch s.perspective {
 			case protocol.PerspectiveClient:
 				clientVersions = s.config.Versions
@@ -1185,7 +1186,8 @@ func (s *connection) handleUnpackedLongHeaderPacket(
 		}
 	}
 
-	if s.perspective == protocol.PerspectiveServer && packet.encryptionLevel == protocol.EncryptionHandshake {
+	if s.perspective == protocol.PerspectiveServer && packet.encryptionLevel == protocol.EncryptionHandshake &&
+		!s.droppedInitialKeys {
 		// On the server side, Initial keys are dropped as soon as the first Handshake packet is received.
 		// See Section 4.9.1 of RFC 9001.
 		if err := s.dropEncryptionLevel(protocol.EncryptionInitial); err != nil {
@@ -1572,13 +1574,6 @@ func (s *connection) closeRemote(e error) {
 	})
 }
 
-// Close the connection. It sends a NO_ERROR application error.
-// It waits until the run loop has stopped before returning
-func (s *connection) shutdown() {
-	s.closeLocal(nil)
-	<-s.ctx.Done()
-}
-
 func (s *connection) CloseWithError(code ApplicationErrorCode, desc string) error {
 	s.closeLocal(&qerr.ApplicationError{
 		ErrorCode:    code,
@@ -1586,6 +1581,11 @@ func (s *connection) CloseWithError(code ApplicationErrorCode, desc string) erro
 	})
 	<-s.ctx.Done()
 	return nil
+}
+
+func (s *connection) closeWithTransportError(code TransportErrorCode) {
+	s.closeLocal(&qerr.TransportError{ErrorCode: code})
+	<-s.ctx.Done()
 }
 
 func (s *connection) handleCloseError(closeErr *closeError) {
@@ -1632,7 +1632,7 @@ func (s *connection) handleCloseError(closeErr *closeError) {
 
 	// If this is a remote close we're done here
 	if closeErr.remote {
-		s.connIDGenerator.ReplaceWithClosed(s.perspective, nil)
+		s.connIDGenerator.ReplaceWithClosed(nil)
 		return
 	}
 	if closeErr.immediate {
@@ -1649,7 +1649,7 @@ func (s *connection) handleCloseError(closeErr *closeError) {
 	if err != nil {
 		s.logger.Debugf("Error sending CONNECTION_CLOSE: %s", err)
 	}
-	s.connIDGenerator.ReplaceWithClosed(s.perspective, connClosePacket)
+	s.connIDGenerator.ReplaceWithClosed(connClosePacket)
 }
 
 func (s *connection) dropEncryptionLevel(encLevel protocol.EncryptionLevel) error {
@@ -1661,6 +1661,7 @@ func (s *connection) dropEncryptionLevel(encLevel protocol.EncryptionLevel) erro
 	//nolint:exhaustive // only Initial and 0-RTT need special treatment
 	switch encLevel {
 	case protocol.EncryptionInitial:
+		s.droppedInitialKeys = true
 		s.cryptoStreamHandler.DiscardInitialKeys()
 	case protocol.Encryption0RTT:
 		s.streamsMap.ResetFor0RTT()
@@ -1755,7 +1756,7 @@ func (s *connection) applyTransportParameters() {
 	params := s.peerParams
 	// Our local idle timeout will always be > 0.
 	s.idleTimeout = utils.MinNonZeroDuration(s.config.MaxIdleTimeout, params.MaxIdleTimeout)
-	s.keepAliveInterval = utils.Min(s.config.KeepAlivePeriod, utils.Min(s.idleTimeout/2, protocol.MaxKeepAliveInterval))
+	s.keepAliveInterval = min(s.config.KeepAlivePeriod, min(s.idleTimeout/2, protocol.MaxKeepAliveInterval))
 	s.streamsMap.UpdateLimits(params)
 	s.frameParser.SetAckDelayExponent(params.AckDelayExponent)
 	s.connFlowController.UpdateSendWindow(params.InitialMaxData)
@@ -2077,7 +2078,8 @@ func (s *connection) sendPackedCoalescedPacket(packet *coalescedPacket, ecn prot
 			largestAcked = p.ack.LargestAcked()
 		}
 		s.sentPacketHandler.SentPacket(now, p.header.PacketNumber, largestAcked, p.streamFrames, p.frames, p.EncryptionLevel(), ecn, p.length, false)
-		if s.perspective == protocol.PerspectiveClient && p.EncryptionLevel() == protocol.EncryptionHandshake {
+		if s.perspective == protocol.PerspectiveClient && p.EncryptionLevel() == protocol.EncryptionHandshake &&
+			!s.droppedInitialKeys {
 			// On the client side, Initial keys are dropped as soon as the first Handshake packet is sent.
 			// See Section 4.9.1 of RFC 9001.
 			if err := s.dropEncryptionLevel(protocol.EncryptionInitial); err != nil {
@@ -2359,7 +2361,7 @@ func (s *connection) SendDatagram(p []byte) error {
 	}
 	f.Data = make([]byte, len(p))
 	copy(f.Data, p)
-	return s.datagramQueue.AddAndWait(f)
+	return s.datagramQueue.Add(f)
 }
 
 func (s *connection) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -2377,11 +2379,7 @@ func (s *connection) RemoteAddr() net.Addr {
 	return s.conn.RemoteAddr()
 }
 
-func (s *connection) getPerspective() protocol.Perspective {
-	return s.perspective
-}
-
-func (s *connection) GetVersion() protocol.VersionNumber {
+func (s *connection) GetVersion() protocol.Version {
 	return s.version
 }
 

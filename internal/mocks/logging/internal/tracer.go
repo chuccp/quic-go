@@ -41,6 +41,78 @@ func (m *MockTracer) EXPECT() *MockTracerMockRecorder {
 	return m.recorder
 }
 
+// Close mocks base method.
+func (m *MockTracer) Close() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Close")
+}
+
+// Close indicates an expected call of Close.
+func (mr *MockTracerMockRecorder) Close() *TracerCloseCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockTracer)(nil).Close))
+	return &TracerCloseCall{Call: call}
+}
+
+// TracerCloseCall wrap *gomock.Call
+type TracerCloseCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *TracerCloseCall) Return() *TracerCloseCall {
+	c.Call = c.Call.Return()
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *TracerCloseCall) Do(f func()) *TracerCloseCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *TracerCloseCall) DoAndReturn(f func()) *TracerCloseCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// Debug mocks base method.
+func (m *MockTracer) Debug(arg0, arg1 string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Debug", arg0, arg1)
+}
+
+// Debug indicates an expected call of Debug.
+func (mr *MockTracerMockRecorder) Debug(arg0, arg1 any) *TracerDebugCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Debug", reflect.TypeOf((*MockTracer)(nil).Debug), arg0, arg1)
+	return &TracerDebugCall{Call: call}
+}
+
+// TracerDebugCall wrap *gomock.Call
+type TracerDebugCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *TracerDebugCall) Return() *TracerDebugCall {
+	c.Call = c.Call.Return()
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *TracerDebugCall) Do(f func(string, string)) *TracerDebugCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *TracerDebugCall) DoAndReturn(f func(string, string)) *TracerDebugCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // DroppedPacket mocks base method.
 func (m *MockTracer) DroppedPacket(arg0 net.Addr, arg1 logging.PacketType, arg2 protocol.ByteCount, arg3 logging.PacketDropReason) {
 	m.ctrl.T.Helper()
@@ -114,7 +186,7 @@ func (c *TracerSentPacketCall) DoAndReturn(f func(net.Addr, *wire.Header, protoc
 }
 
 // SentVersionNegotiationPacket mocks base method.
-func (m *MockTracer) SentVersionNegotiationPacket(arg0 net.Addr, arg1, arg2 protocol.ArbitraryLenConnectionID, arg3 []protocol.VersionNumber) {
+func (m *MockTracer) SentVersionNegotiationPacket(arg0 net.Addr, arg1, arg2 protocol.ArbitraryLenConnectionID, arg3 []protocol.Version) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "SentVersionNegotiationPacket", arg0, arg1, arg2, arg3)
 }
@@ -138,13 +210,13 @@ func (c *TracerSentVersionNegotiationPacketCall) Return() *TracerSentVersionNego
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *TracerSentVersionNegotiationPacketCall) Do(f func(net.Addr, protocol.ArbitraryLenConnectionID, protocol.ArbitraryLenConnectionID, []protocol.VersionNumber)) *TracerSentVersionNegotiationPacketCall {
+func (c *TracerSentVersionNegotiationPacketCall) Do(f func(net.Addr, protocol.ArbitraryLenConnectionID, protocol.ArbitraryLenConnectionID, []protocol.Version)) *TracerSentVersionNegotiationPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *TracerSentVersionNegotiationPacketCall) DoAndReturn(f func(net.Addr, protocol.ArbitraryLenConnectionID, protocol.ArbitraryLenConnectionID, []protocol.VersionNumber)) *TracerSentVersionNegotiationPacketCall {
+func (c *TracerSentVersionNegotiationPacketCall) DoAndReturn(f func(net.Addr, protocol.ArbitraryLenConnectionID, protocol.ArbitraryLenConnectionID, []protocol.Version)) *TracerSentVersionNegotiationPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

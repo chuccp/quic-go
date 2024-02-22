@@ -13,7 +13,6 @@ import (
 	net "net"
 	reflect "reflect"
 
-	protocol "github.com/quic-go/quic-go/internal/protocol"
 	qerr "github.com/quic-go/quic-go/internal/qerr"
 	gomock "go.uber.org/mock/gomock"
 )
@@ -229,44 +228,6 @@ func (c *QUICConnContextCall) Do(f func() context.Context) *QUICConnContextCall 
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *QUICConnContextCall) DoAndReturn(f func() context.Context) *QUICConnContextCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// GetVersion mocks base method.
-func (m *MockQUICConn) GetVersion() protocol.VersionNumber {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetVersion")
-	ret0, _ := ret[0].(protocol.VersionNumber)
-	return ret0
-}
-
-// GetVersion indicates an expected call of GetVersion.
-func (mr *MockQUICConnMockRecorder) GetVersion() *QUICConnGetVersionCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetVersion", reflect.TypeOf((*MockQUICConn)(nil).GetVersion))
-	return &QUICConnGetVersionCall{Call: call}
-}
-
-// QUICConnGetVersionCall wrap *gomock.Call
-type QUICConnGetVersionCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *QUICConnGetVersionCall) Return(arg0 protocol.VersionNumber) *QUICConnGetVersionCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *QUICConnGetVersionCall) Do(f func() protocol.VersionNumber) *QUICConnGetVersionCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *QUICConnGetVersionCall) DoAndReturn(f func() protocol.VersionNumber) *QUICConnGetVersionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -656,6 +617,42 @@ func (c *QUICConnSendDatagramCall) DoAndReturn(f func([]byte) error) *QUICConnSe
 	return c
 }
 
+// closeWithTransportError mocks base method.
+func (m *MockQUICConn) closeWithTransportError(arg0 qerr.TransportErrorCode) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "closeWithTransportError", arg0)
+}
+
+// closeWithTransportError indicates an expected call of closeWithTransportError.
+func (mr *MockQUICConnMockRecorder) closeWithTransportError(arg0 any) *QUICConncloseWithTransportErrorCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "closeWithTransportError", reflect.TypeOf((*MockQUICConn)(nil).closeWithTransportError), arg0)
+	return &QUICConncloseWithTransportErrorCall{Call: call}
+}
+
+// QUICConncloseWithTransportErrorCall wrap *gomock.Call
+type QUICConncloseWithTransportErrorCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *QUICConncloseWithTransportErrorCall) Return() *QUICConncloseWithTransportErrorCall {
+	c.Call = c.Call.Return()
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *QUICConncloseWithTransportErrorCall) Do(f func(qerr.TransportErrorCode)) *QUICConncloseWithTransportErrorCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *QUICConncloseWithTransportErrorCall) DoAndReturn(f func(qerr.TransportErrorCode)) *QUICConncloseWithTransportErrorCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // destroy mocks base method.
 func (m *MockQUICConn) destroy(arg0 error) {
 	m.ctrl.T.Helper()
@@ -730,44 +727,6 @@ func (c *QUICConnearlyConnReadyCall) DoAndReturn(f func() <-chan struct{}) *QUIC
 	return c
 }
 
-// getPerspective mocks base method.
-func (m *MockQUICConn) getPerspective() protocol.Perspective {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "getPerspective")
-	ret0, _ := ret[0].(protocol.Perspective)
-	return ret0
-}
-
-// getPerspective indicates an expected call of getPerspective.
-func (mr *MockQUICConnMockRecorder) getPerspective() *QUICConngetPerspectiveCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "getPerspective", reflect.TypeOf((*MockQUICConn)(nil).getPerspective))
-	return &QUICConngetPerspectiveCall{Call: call}
-}
-
-// QUICConngetPerspectiveCall wrap *gomock.Call
-type QUICConngetPerspectiveCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *QUICConngetPerspectiveCall) Return(arg0 protocol.Perspective) *QUICConngetPerspectiveCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *QUICConngetPerspectiveCall) Do(f func() protocol.Perspective) *QUICConngetPerspectiveCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *QUICConngetPerspectiveCall) DoAndReturn(f func() protocol.Perspective) *QUICConngetPerspectiveCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
 // handlePacket mocks base method.
 func (m *MockQUICConn) handlePacket(arg0 receivedPacket) {
 	m.ctrl.T.Helper()
@@ -838,42 +797,6 @@ func (c *QUICConnrunCall) Do(f func() error) *QUICConnrunCall {
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *QUICConnrunCall) DoAndReturn(f func() error) *QUICConnrunCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// shutdown mocks base method.
-func (m *MockQUICConn) shutdown() {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "shutdown")
-}
-
-// shutdown indicates an expected call of shutdown.
-func (mr *MockQUICConnMockRecorder) shutdown() *QUICConnshutdownCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "shutdown", reflect.TypeOf((*MockQUICConn)(nil).shutdown))
-	return &QUICConnshutdownCall{Call: call}
-}
-
-// QUICConnshutdownCall wrap *gomock.Call
-type QUICConnshutdownCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *QUICConnshutdownCall) Return() *QUICConnshutdownCall {
-	c.Call = c.Call.Return()
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *QUICConnshutdownCall) Do(f func()) *QUICConnshutdownCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *QUICConnshutdownCall) DoAndReturn(f func()) *QUICConnshutdownCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

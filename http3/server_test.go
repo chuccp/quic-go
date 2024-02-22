@@ -67,11 +67,15 @@ var _ = Describe("Server", func() {
 		s                  *Server
 		origQuicListenAddr = quicListenAddr
 	)
+	type testConnContextKey string
 
 	BeforeEach(func() {
 		s = &Server{
 			TLSConfig: testdata.GetTLSConfig(),
 			logger:    utils.DefaultLogger,
+			ConnContext: func(ctx context.Context, c quic.Connection) context.Context {
+				return context.WithValue(ctx, testConnContextKey("test"), c)
+			},
 		}
 		origQuicListenAddr = quicListenAddr
 	})
@@ -163,6 +167,7 @@ var _ = Describe("Server", func() {
 			Expect(req.Host).To(Equal("www.example.com"))
 			Expect(req.RemoteAddr).To(Equal("127.0.0.1:1337"))
 			Expect(req.Context().Value(ServerContextKey)).To(Equal(s))
+			Expect(req.Context().Value(testConnContextKey("test"))).ToNot(Equal(nil))
 		})
 
 		It("returns 200 with an empty handler", func() {
@@ -850,7 +855,7 @@ var _ = Describe("Server", func() {
 
 	Context("setting http headers", func() {
 		BeforeEach(func() {
-			s.QuicConfig = &quic.Config{Versions: []protocol.VersionNumber{protocol.Version1}}
+			s.QuicConfig = &quic.Config{Versions: []protocol.Version{protocol.Version1}}
 		})
 
 		var ln1 QUICEarlyListener
@@ -911,7 +916,7 @@ var _ = Describe("Server", func() {
 		})
 
 		It("works if the quic.Config sets QUIC versions", func() {
-			s.QuicConfig.Versions = []quic.VersionNumber{quic.Version1, quic.Version2}
+			s.QuicConfig.Versions = []quic.Version{quic.Version1, quic.Version2}
 			addListener(":443", &ln1)
 			checkSetHeaders(Equal(http.Header{"Alt-Svc": {`h3=":443"; ma=2592000`}}))
 			removeListener(&ln1)
@@ -950,7 +955,7 @@ var _ = Describe("Server", func() {
 		})
 
 		It("doesn't duplicate Alt-Svc values", func() {
-			s.QuicConfig.Versions = []quic.VersionNumber{quic.Version1, quic.Version1}
+			s.QuicConfig.Versions = []quic.Version{quic.Version1, quic.Version1}
 			addListener(":443", &ln1)
 			checkSetHeaders(Equal(http.Header{"Alt-Svc": {`h3=":443"; ma=2592000`}}))
 			removeListener(&ln1)
@@ -991,7 +996,7 @@ var _ = Describe("Server", func() {
 	Context("ConfigureTLSConfig", func() {
 		It("advertises v1 by default", func() {
 			conf := ConfigureTLSConfig(testdata.GetTLSConfig())
-			ln, err := quic.ListenAddr("localhost:0", conf, &quic.Config{Versions: []quic.VersionNumber{quic.Version1}})
+			ln, err := quic.ListenAddr("localhost:0", conf, &quic.Config{Versions: []quic.Version{quic.Version1}})
 			Expect(err).ToNot(HaveOccurred())
 			defer ln.Close()
 			c, err := quic.DialAddr(context.Background(), ln.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{NextProtoH3}}, nil)
@@ -1019,7 +1024,7 @@ var _ = Describe("Server", func() {
 				},
 			}
 
-			ln, err := quic.ListenAddr("localhost:0", ConfigureTLSConfig(tlsConf), &quic.Config{Versions: []quic.VersionNumber{quic.Version1}})
+			ln, err := quic.ListenAddr("localhost:0", ConfigureTLSConfig(tlsConf), &quic.Config{Versions: []quic.Version{quic.Version1}})
 			Expect(err).ToNot(HaveOccurred())
 			defer ln.Close()
 			c, err := quic.DialAddr(context.Background(), ln.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{NextProtoH3}}, nil)
@@ -1032,7 +1037,7 @@ var _ = Describe("Server", func() {
 			tlsConf := testdata.GetTLSConfig()
 			tlsConf.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) { return nil, nil }
 
-			ln, err := quic.ListenAddr("localhost:0", ConfigureTLSConfig(tlsConf), &quic.Config{Versions: []quic.VersionNumber{quic.Version1}})
+			ln, err := quic.ListenAddr("localhost:0", ConfigureTLSConfig(tlsConf), &quic.Config{Versions: []quic.Version{quic.Version1}})
 			Expect(err).ToNot(HaveOccurred())
 			defer ln.Close()
 			c, err := quic.DialAddr(context.Background(), ln.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{NextProtoH3}}, nil)
@@ -1050,7 +1055,7 @@ var _ = Describe("Server", func() {
 				},
 			}
 
-			ln, err := quic.ListenAddr("localhost:0", ConfigureTLSConfig(tlsConf), &quic.Config{Versions: []quic.VersionNumber{quic.Version1}})
+			ln, err := quic.ListenAddr("localhost:0", ConfigureTLSConfig(tlsConf), &quic.Config{Versions: []quic.Version{quic.Version1}})
 			Expect(err).ToNot(HaveOccurred())
 			defer ln.Close()
 			c, err := quic.DialAddr(context.Background(), ln.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{NextProtoH3}}, nil)
