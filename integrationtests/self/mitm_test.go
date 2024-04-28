@@ -41,8 +41,9 @@ var _ = Describe("MITM test", func() {
 			Conn:               c,
 			ConnectionIDLength: connIDLen,
 		}
+		addTracer(serverTransport)
 		if forceAddressValidation {
-			serverTransport.MaxUnvalidatedHandshakes = -1
+			serverTransport.VerifySourceAddress = func(net.Addr) bool { return true }
 		}
 		ln, err := serverTransport.Listen(getTLSConfig(), serverConfig)
 		Expect(err).ToNot(HaveOccurred())
@@ -86,6 +87,7 @@ var _ = Describe("MITM test", func() {
 			Conn:               clientUDPConn,
 			ConnectionIDLength: connIDLen,
 		}
+		addTracer(clientTransport)
 	})
 
 	Context("unsuccessful attacks", func() {
@@ -417,7 +419,7 @@ var _ = Describe("MITM test", func() {
 					}
 					defer close(done)
 					injected = true
-					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.DestConnectionID, nil, protocol.PerspectiveServer, hdr.Version)
+					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.DestConnectionID, nil, nil, protocol.PerspectiveServer, hdr.Version)
 					_, err = serverTransport.WriteTo(initialPacket, clientTransport.Conn.LocalAddr())
 					Expect(err).ToNot(HaveOccurred())
 				}
@@ -449,7 +451,7 @@ var _ = Describe("MITM test", func() {
 					injected = true
 					// Fake Initial with ACK for packet 2 (unsent)
 					ack := &wire.AckFrame{AckRanges: []wire.AckRange{{Smallest: 2, Largest: 2}}}
-					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.DestConnectionID, []wire.Frame{ack}, protocol.PerspectiveServer, hdr.Version)
+					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.DestConnectionID, nil, []wire.Frame{ack}, protocol.PerspectiveServer, hdr.Version)
 					_, err = serverTransport.WriteTo(initialPacket, clientTransport.Conn.LocalAddr())
 					Expect(err).ToNot(HaveOccurred())
 				}

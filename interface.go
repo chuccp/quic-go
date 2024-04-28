@@ -59,6 +59,9 @@ var Err0RTTRejected = errors.New("0-RTT rejected")
 // as well as on the context passed to logging.Tracer.NewConnectionTracer.
 var ConnectionTracingKey = connTracingCtxKey{}
 
+// ConnectionTracingID is the type of the context value saved under the ConnectionTracingKey.
+type ConnectionTracingID uint64
+
 type connTracingCtxKey struct{}
 
 // QUICVersionContextKey can be used to find out the QUIC version of a TLS handshake from the
@@ -121,7 +124,9 @@ type SendStream interface {
 	// CancelWrite aborts sending on this stream.
 	// Data already written, but not yet delivered to the peer is not guaranteed to be delivered reliably.
 	// Write will unblock immediately, and future calls to Write will fail.
-	// When called multiple times or after closing the stream it is a no-op.
+	// When called multiple times it is a no-op.
+	// When called after Close, it aborts delivery. Note that there is no guarantee if
+	// the peer will receive the FIN or the reset first.
 	CancelWrite(StreamErrorCode)
 	// The Context is canceled as soon as the write-side of the stream is closed.
 	// This happens when Close() or CancelWrite() is called, or when the peer
@@ -163,6 +168,9 @@ type Connection interface {
 	OpenStream() (Stream, error)
 	// OpenStreamSync opens a new bidirectional QUIC stream.
 	// It blocks until a new stream can be opened.
+	// There is no signaling to the peer about new streams:
+	// The peer can only accept the stream after data has been sent on the stream,
+	// or the stream has been reset or closed.
 	// If the error is non-nil, it satisfies the net.Error interface.
 	// If the connection was closed due to a timeout, Timeout() will be true.
 	OpenStreamSync(context.Context) (Stream, error)
@@ -330,8 +338,15 @@ type Config struct {
 	Tracer          func(context.Context, logging.Perspective, ConnectionID) *logging.ConnectionTracer
 }
 
+// ClientHelloInfo contains information about an incoming connection attempt.
 type ClientHelloInfo struct {
+	// RemoteAddr is the remote address on the Initial packet.
+	// Unless AddrVerified is set, the address is not yet verified, and could be a spoofed IP address.
 	RemoteAddr net.Addr
+	// AddrVerified says if the remote address was verified using QUIC's Retry mechanism.
+	// Note that the Retry mechanism costs one network roundtrip,
+	// and is not performed unless Transport.MaxUnvalidatedHandshakes is surpassed.
+	AddrVerified bool
 }
 
 // ConnectionState records basic details about a QUIC connection
